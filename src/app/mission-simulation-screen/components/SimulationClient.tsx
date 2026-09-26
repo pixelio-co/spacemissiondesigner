@@ -121,14 +121,46 @@ export default function SimulationClient() {
   const replayId = searchParams.get('replay');
   const replayAutonomy = searchParams.get('autonomy') as AutonomyChoice | null;
   const replayLabel = searchParams.get('replayLabel');
+  const replayDecisionId = searchParams.get('replayDecision');
+  const replayChoiceRaw = searchParams.get('replayChoice');
+  const originalRecordId = searchParams.get('originalRecord');
+  // Pre-scripted replay: every decision is answered from the original run so
+  // only the changed decision (in replayDecision/replayChoice, or overridden in
+  // replayChoices JSON) differs from the original mission.
+  const replayChoicesRaw = searchParams.get('replayChoices');
+  const scriptedDecisions = useMemo<Record<string, number>>(() => {
+    if (!replayChoicesRaw) return {};
+    try {
+      const parsed = JSON.parse(replayChoicesRaw) as Record<string, number>;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed).filter(([, v]) => Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])
+      );
+    } catch {
+      return {};
+    }
+  }, [replayChoicesRaw]);
 
   // Pre-compute the full mission story from the pure engine.
+  // Live player choices are fed back in as fixedDecisions/autonomy so the record
+  // always reflects what actually happened, not the engine's defaults.
+  const [playerDecisions, setPlayerDecisions] = useState<Record<string, number>>({});
+  const [playerAutonomy, setPlayerAutonomy] = useState<AutonomyChoice | null>(null);
   const run: RunResult | null = useMemo(() => {
     if (!missionActive) return null;
-    const opts: { autonomy?: AutonomyChoice } = {};
+    const opts: { autonomy?: AutonomyChoice; fixedDecisions?: Record<string, number> } = {};
+    if (Object.keys(scriptedDecisions).length > 0) opts.fixedDecisions = { ...scriptedDecisions };
+    if (replayDecisionId) {
+      const parsed = Number(replayChoiceRaw);
+      opts.fixedDecisions = { ...opts.fixedDecisions, [replayDecisionId]: Number.isFinite(parsed) ? parsed : 1 };
+    }
+    if (Object.keys(playerDecisions).length > 0) {
+      opts.fixedDecisions = { ...opts.fixedDecisions, ...playerDecisions };
+    }
     if (replayAutonomy) opts.autonomy = replayAutonomy;
+    if (playerAutonomy) opts.autonomy = playerAutonomy;
     return runMission(mission, opts);
-  }, [mission, missionActive, replayAutonomy]);
+  }, [mission, missionActive, replayAutonomy, replayDecisionId, replayChoiceRaw, scriptedDecisions, playerDecisions, playerAutonomy]);
 
   const [phase, setPhase] = useState<SimPhase>('pre-launch');
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -155,6 +187,7 @@ export default function SimulationClient() {
     autonomyChosen: null as AutonomyChoice | null,
     finished: false,
   });
+  const playerChoicesRef = useRef({ decisions: {} as Record<string, number>, autonomy: null as AutonomyChoice | null });
 
   const addLog = useCallback((message: string, type: LogEntry['type'] = 'neutral', cause?: string) => {
     const now = new Date();
@@ -179,31 +212,41 @@ export default function SimulationClient() {
 
   // Reset all run state (used by launch).
   const resetRun = useCallback(() => {
+    // In a replay, decisions and autonomy come pre-scripted from the URL.
+    const replayMode = Boolean(replayId);
+    const scriptedAutonomy = replayMode ? (replayAutonomy ?? (Object.keys(scriptedDecisions).length > 0 ? 'continue-science' : null)) : null;
     runStateRef.current = {
       firedEvents: new Set(),
       pendingDecision: null,
       pendingAutonomy: false,
-      autonomyChosen: replayAutonomy ?? null,
+      autonomyChosen: scriptedAutonomy,
       finished: false,
     };
+    playerChoicesRef.current = { decisions: replayMode ? scriptedDecisions : {}, autonomy: scriptedAutonomy };
+    setPlayerDecisions(replayMode ? scriptedDecisions : {});
+    setPlayerAutonomy(scriptedAutonomy);
     setLog([]);
     setSystems({ power: 100, communication: 100, propulsion: 100, instruments: 100, navigation: 100, radiation: 0 });
     setProgress(0);
     setDecisionEvent(null);
     setAutonomyOpen(false);
-    setAutonomyChoice(replayAutonomy ?? null);
+    setAutonomyChoice(scriptedAutonomy);
     setTransit(null);
     setResult(null);
     setCurrentDecisionLabel('None yet — awaiting events');
     setSavedRecordId(null);
-  }, [replayAutonomy]);
+  }, [replayId, replayAutonomy, scriptedDecisions]);
 
-  const finishMission = useCallback(() => {
+  const finishMission = useCallback((early = false) => {
     if (runStateRef.current.finished || !run) return;
     runStateRef.current.finished = true;
     setPhase('complete');
     setIsRunning(false);
-    addLog('Mission complete. Compiling final report…', 'success');
+    if (early) {
+      addLog('CRITICAL — autonomous safing engaged. Mission ended early.', 'danger');
+    } else {
+      addLog('Mission complete. Compiling final report…', 'success');
+    }
 
     const stored = saveMissionRecord(mission, run.record);
     setSavedRecordId(stored.id);
@@ -219,6 +262,8 @@ export default function SimulationClient() {
       const st = runStateRef.current;
       setProgress(prev => {
         const next = Math.min(prev + 1.2, 100);
+        // A lost mission stops the clock at its endProgress — not 100.
+        const stopAt = run.record.endedEarly ? run.record.endProgress : 100;
 
         for (const ev of run.record.events) {
           if (st.firedEvents.has(ev.id) || next < ev.atProgress) continue;
@@ -226,6 +271,8 @@ export default function SimulationClient() {
 
           setPhase(phaseForEventProgress(ev.atProgress));
           addLog(ev.message, ev.type, ev.cause);
+          // Scenario damage is real: mirror the engine's system state live.
+          if (ev.systemEffect) applyEffect(ev.systemEffect);
 
           if (ev.commDelay) {
             // Educational transit demo: command → in transit → received.
@@ -235,7 +282,16 @@ export default function SimulationClient() {
             setTimeout(() => setTransit(null), 4200);
           }
 
-          if (ev.requiresDecision && ev.scenario && !st.autonomyChosen) {
+          // Pre-scripted replays never pause: their answer is already in
+          // playerChoicesRef and was resolved by the engine. Log the scripted
+          // choice so the replay tells the same story as the original run.
+          if (ev.requiresDecision && ev.scenario && playerChoicesRef.current.decisions[ev.id] !== undefined) {
+            const scripted = SCENARIO_DEFINITIONS[ev.scenario].decisionOptions[
+              Math.min(playerChoicesRef.current.decisions[ev.id], SCENARIO_DEFINITIONS[ev.scenario].decisionOptions.length - 1)
+            ];
+            addLog(`Decision: ${scripted.label}`, 'info');
+            addLog(scripted.consequence, 'success');
+          } else if (ev.requiresDecision && ev.scenario && !st.autonomyChosen) {
             st.pendingDecision = ev;
             setDecisionEvent(ev);
             setIsRunning(false);
@@ -247,8 +303,8 @@ export default function SimulationClient() {
           }
         }
 
-        if (next >= 100) {
-          finishMission();
+        if (next >= stopAt) {
+          finishMission(next < 100);
         }
         return next;
       });
@@ -259,7 +315,7 @@ export default function SimulationClient() {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
     };
-  }, [missionActive, isRunning, phase, run, addLog, finishMission]);
+  }, [missionActive, isRunning, phase, run, addLog, applyEffect, finishMission]);
 
   const handleDecision = useCallback((optionIndex: number, educationalWhy: string) => {
     const st = runStateRef.current;
@@ -275,6 +331,8 @@ export default function SimulationClient() {
     addLog(`Why: ${opt.educationalWhy}`, 'neutral');
     toast.success(opt.consequence);
     st.pendingDecision = null;
+    playerChoicesRef.current.decisions[ev.id] = optionIndex;
+    setPlayerDecisions({ ...playerChoicesRef.current.decisions });
     setDecisionEvent(null);
     setIsRunning(true);
   }, [applyEffect, addLog]);
@@ -291,6 +349,8 @@ export default function SimulationClient() {
     toast.info(outcome.label);
     st.pendingAutonomy = false;
     st.autonomyChosen = choice;
+    playerChoicesRef.current.autonomy = choice;
+    setPlayerAutonomy(choice);
     setAutonomyOpen(false);
     setIsRunning(true);
   }, [mission, systems, applyEffect, addLog]);
@@ -318,6 +378,9 @@ export default function SimulationClient() {
     searchParams.get('replay'),
     searchParams.get('autonomy'),
     searchParams.get('replayLabel'),
+    searchParams.get('replayDecision'),
+    searchParams.get('replayChoice'),
+    searchParams.get('replayChoices'),
   ].join('|');
   const launchedForRef = useRef<string | null>(null);
   useEffect(() => {
@@ -347,6 +410,7 @@ export default function SimulationClient() {
         replayMode={Boolean(replayId)}
         replayChangedLabel={replayLabel}
         savedRecordId={savedRecordId}
+        originalRecordId={originalRecordId}
       />
     );
   }

@@ -11,7 +11,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { SimulationRecord, AutonomyChoice } from '@/lib/simulationEngine';
 import { runMission } from '@/lib/simulationEngine';
-import { loadMissionRecords } from '@/lib/missionHistory';
+import { getMissionRecord } from '@/lib/missionHistory';
 import {
   CheckCircle, XCircle, AlertTriangle, Star, RotateCcw, BookOpen, Rocket,
   ChevronDown, ChevronUp, Search, FlaskConical, Repeat, GitCompare,
@@ -25,6 +25,7 @@ interface Props {
   replayMode: boolean;
   replayChangedLabel: string | null;
   savedRecordId: string | null;
+  originalRecordId: string | null;
 }
 
 const resultConfig = {
@@ -48,7 +49,12 @@ interface ReplayOption {
   key: string;
   label: string;
   detail: string;
+  /** The alternative autonomy behavior (autonomy replays only). */
   autonomy?: AutonomyChoice;
+  /** The alternative option index (decision replays only). */
+  choiceIndex?: number;
+  /** The decision event whose answer changes. */
+  decisionEventId?: string;
   query: Record<string, string>;
 }
 
@@ -76,29 +82,34 @@ function buildReplayOptions(record: SimulationRecord): ReplayOption[] {
           label: `During communication interruption → ${alt.label}`,
           detail: alt.detail,
           autonomy: alt.choice,
-          query: { autonomy: alt.choice, replayLabel: `Autonomy: ${alt.label}` },
+          query: { replayLabel: `Autonomy: ${alt.label}` },
         });
       }
     });
   }
 
-  // Decision replays: re-run each player decision with a different option.
+  // Decision replays: re-run each player decision with a DIFFERENT option.
+  // Every other recorded decision is held constant via replayChoices, so the
+  // changed decision is the only variable between original and replay.
   const playerDecisions = record.decisions.filter(d => d.kind === 'player');
   playerDecisions.forEach(d => {
     const ev = record.events.find(e => e.id === d.eventId);
     if (!ev?.scenario) return;
+    const altIndex = d.optionIndex === 1 ? 0 : 1; // pick a different response
     opts.push({
       key: `replay-decision-${d.eventId}`,
       label: `${d.eventTitle} → different response`,
-      detail: 'Re-run the mission answering this event differently and compare what changes.',
-      query: { replayDecision: d.eventId, replayLabel: `${d.eventTitle} — alternative response` },
+      detail: `Re-answer this event differently (you chose “${d.optionLabel}”). Everything else stays the same.`,
+      choiceIndex: altIndex,
+      decisionEventId: d.eventId,
+      query: { replayLabel: `${d.eventTitle} — alternative response` },
     });
   });
 
   return opts.slice(0, 3);
 }
 
-export default function MissionResultScreen({ record, replayMode, replayChangedLabel, savedRecordId }: Props) {
+export default function MissionResultScreen({ record, replayMode, replayChangedLabel, savedRecordId, originalRecordId }: Props) {
   const router = useRouter();
   const [showFullReport, setShowFullReport] = useState(false);
   const [replayOpen, setReplayOpen] = useState(replayMode);
@@ -110,18 +121,35 @@ export default function MissionResultScreen({ record, replayMode, replayChangedL
 
   // For replay mode: find the original record to compare against.
   const originalRecord = useMemo(() => {
-    if (!replayMode) return null;
-    const records = loadMissionRecords();
-    // The most recent record that isn't this run's mission-with-changed-decision.
-    return records.find(r => r.record.seed === record.seed && r.record.endProgress !== record.endProgress)
-      ?? records[1]
-      ?? records[0]
-      ?? null;
-  }, [replayMode, record]);
+    if (!replayMode || !originalRecordId) return null;
+    return getMissionRecord(originalRecordId);
+  }, [replayMode, originalRecordId]);
 
   const replayOptions = useMemo(() => buildReplayOptions(record), [record]);
 
+  // The original run's autonomy behavior — held constant in decision replays so
+  // the changed decision is the ONLY variable.
+  const originalAutonomy: AutonomyChoice | null = useMemo(() => {
+    const d = record.decisions.find(x => x.kind === 'autonomy');
+    if (!d) return null;
+    const l = d.optionLabel.toLowerCase();
+    if (l.includes('safe')) return 'safe-mode';
+    if (l.includes('wait')) return 'wait';
+    return 'continue-science';
+  }, [record]);
+
   const startReplay = (opt: ReplayOption) => {
+    // Re-script EVERY recorded decision so only the chosen variable changes.
+    // Autonomy replays hold all player answers and the same autonomy;
+    // decision replays hold all answers + autonomy except one event.
+    const heldDecisions: Record<string, number> = {};
+    record.decisions.forEach(d => {
+      if (d.kind === 'player') heldDecisions[d.eventId] = d.optionIndex;
+    });
+    if (opt.decisionEventId) {
+      heldDecisions[opt.decisionEventId] = opt.choiceIndex ?? 1;
+    }
+
     const params = new URLSearchParams({
       missionName: mission.missionName || 'Mission Alpha',
       objective: mission.objective ?? '',
@@ -132,7 +160,11 @@ export default function MissionResultScreen({ record, replayMode, replayChangedL
       power: mission.power ?? '',
       communication: mission.communication ?? '',
       replay: savedRecordId ?? '1',
-      ...(opt.autonomy ? { autonomy: opt.autonomy } : {}),
+      originalRecord: savedRecordId ?? '',
+      replayChoices: JSON.stringify(heldDecisions),
+      // Autonomy replays pass the NEW choice; decision replays pin the ORIGINAL
+      // autonomy so it does not silently reset to the default.
+      ...((opt.autonomy ?? originalAutonomy) ? { autonomy: opt.autonomy ?? originalAutonomy! } : {}),
       ...(opt.query.replayLabel ? { replayLabel: opt.query.replayLabel } : {}),
     });
     router.push(`/mission-simulation-screen?${params.toString()}`);

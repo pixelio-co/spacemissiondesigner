@@ -115,6 +115,8 @@ export interface DecisionRecord {
   eventId: string;
   eventTitle: string;
   optionLabel: string;
+  /** Index of the chosen option within the scenario's decisionOptions. */
+  optionIndex: number;
   consequence: string;
   effects: Partial<SystemStatus>;
   atProgress: number;
@@ -132,6 +134,8 @@ export interface SimulationRecord {
   decisions: DecisionRecord[];
   discoveries: import('./scienceEngine').ScienceDiscovery[];
   finalSystems: SystemStatus;
+  /** Sum of negative system-point applications the mission absorbed during flight. */
+  damageTaken: number;
   dataStoredGb: number;
   dataReturnedGb: number;
   observationsCompleted: number;
@@ -169,6 +173,17 @@ export function configurationFactors(mission: MissionState) {
     ? (COMMUNICATION_SYSTEMS[mission.communication].suitableDestinations.includes(mission.destination) ? 1 : 0.35)
     : 0.5;
   const destDistance = dest ? ({ near: 0, inner: 1, outer: 2, deep: 3 } as const)[dest.distanceCategory] : 1;
+  // How badly each subsystem fits the destination, 0–100 (lower = worse fit).
+  // These drive damage scaling: a mismatched subsystem should not merely "have
+  // an event" — it should take real damage when reality stresses it.
+  const fits = [
+    scores.powerCompatibility,
+    scores.propulsionSuitability,
+    scores.communication,
+    scores.destinationCompatibility,
+  ].sort((a, b) => a - b);
+  const worstFit = fits[0];
+  const secondWorstFit = fits[1];
 
   return {
     scores,
@@ -177,6 +192,8 @@ export function configurationFactors(mission: MissionState) {
     powerMargin,
     commReach,
     destDistance,
+    worstFit,
+    secondWorstFit,
     commSuitable: mission.communication && mission.destination
       ? COMMUNICATION_SYSTEMS[mission.communication].suitableDestinations.includes(mission.destination)
       : false,
@@ -228,9 +245,17 @@ function scenarioWeights(mission: MissionState, f: ReturnType<typeof configurati
   if (['jupiter', 'saturn'].includes(mission.destination!)) w['radiation-challenge'] += 22;
   if (mission.destination === 'moon') w['radiation-challenge'] += 6; // unfiltered solar events
 
-  if (f.overall < 35) {
-    w['mission-failure'] = 55; // badly mismatched designs genuinely risk ending early
-  }
+  // Outcome-risk tiering: badly mismatched designs genuinely risk ending early,
+  // mediocre designs get constrained (partial) stories instead of automatic wins.
+  // The WORST-FITTING subsystems matter more than the average: solar panels at
+  // Neptune are a real problem even if the rest of the design is excellent.
+  w['mission-failure'] = f.worstFit < 25 && f.secondWorstFit < 40 ? 70
+    : f.worstFit < 20 ? 40
+    : f.overall < 30 ? 55
+    : 0;
+  if (f.worstFit < 45) w['partial-success'] += 16;
+  if (f.overall < 55) w['partial-success'] += 10;
+  if (f.powerMargin <= 0) w['mission-failure'] += 20; // instruments outdraw the power system
 
   return w;
 }
@@ -291,12 +316,18 @@ export function runMission(
   let dataStoredGb = 0;
   let observations = 0;
   let majorFindings = 0;
+  // Total system stress absorbed: every negative point applied to any system,
+  // from scenario damage, decision costs, and autonomy trade-offs alike. Used
+  // so a mission that "recovered" from trouble cannot rate a clean success.
+  let damageTaken = 0;
   const discoveries: import('./scienceEngine').ScienceDiscovery[] = [];
 
   const applyEffect = (effect?: Partial<SystemStatus>) => {
     if (!effect) return;
     (Object.keys(effect) as (keyof SystemStatus)[]).forEach(k => {
-      systems[k] = Math.max(0, Math.min(100, systems[k] + (effect[k] ?? 0)));
+      const delta = effect[k] ?? 0;
+      systems[k] = Math.max(0, Math.min(100, systems[k] + delta));
+      if (delta < 0) damageTaken += Math.abs(delta);
     });
   };
 
@@ -341,11 +372,15 @@ export function runMission(
   // ── Scenario event (configuration-driven) ────────────────────────────────
   const scenarioDef = SCENARIO_DEFINITIONS[scenario];
   if (scenario !== 'smooth' && scenario !== 'science-breakthrough') {
-    const severity = Math.min(1, 0.55 + (1 - f.overall / 100) * 0.45);
+    // Damage scales with how badly the STRESSED subsystem fits: a well-matched
+    // design shakes off an anomaly, a badly-matched one takes the full hit.
+    // Also scaled by overall design quality so systemic mismatch compounds.
+    const fitDamageFactor = 0.6 + (1 - Math.min(f.worstFit, 60) / 60) * 0.9;   // 0.6×–1.5×
+    const designFactor = 0.7 + (1 - f.overall / 100) * 0.5;                    // 0.7×–1.2×
+    const damageFactor = fitDamageFactor * designFactor * (scenario === 'mission-failure' ? 1.25 : 1);
     const eff = { ...scenarioDef.systemEffect };
-    // Scale damage by design quality: good designs absorb more.
     (Object.keys(eff) as (keyof SystemStatus)[]).forEach(k => {
-      eff[k] = Math.round((eff[k] ?? 0) * (0.6 + severity * 0.5));
+      eff[k] = Math.round((eff[k] ?? 0) * damageFactor);
     });
     addEvent({
       atProgress: 60, type: scenarioDef.logType, title: scenarioDef.title,
@@ -357,6 +392,9 @@ export function runMission(
     });
     const ev = events[events.length - 1];
     if (scenarioDef.decisionOptions.length > 0) decisionPoints.push(ev);
+    // The scenario's damage is real — apply it to system state immediately so
+    // every later phase (decisions, science ops, autonomy, outcome) reflects it.
+    applyEffect(eff);
   } else if (scenario === 'science-breakthrough') {
     addEvent({
       atProgress: 62, type: 'success', title: 'Unexpected observation',
@@ -364,6 +402,54 @@ export function runMission(
       cause: 'Well-matched instruments operating in a rich environment occasionally produce standout results.',
       systemEffect: { instruments: 8 },
       scenario,
+    });
+  }
+
+  // ── Autonomy decision point (comm interruptions) ─────────────────────────
+  if (scenario === 'comm-interrupted' || (f.commSuitable === false && f.destDistance >= 1) || (delayInfo && delayInfo.lightTime.seconds > 300)) {
+    const ev = addEvent({
+      atProgress: 72, type: 'warning', title: 'Communication gap',
+      message: `The link with Earth drops during ${destLabel} operations. The spacecraft must act on its own for the next contact window.`,
+      cause: 'Signal delay and antenna margin make continuous contact impossible for this design.',
+      autonomyPrompt: true,
+    });
+    autonomyPoint = ev;
+  }
+
+  // ── Resolve decisions (fixed or default first option) ────────────────────
+  // Resolved BEFORE science ops so consequences shape the rest of the run —
+  // scenario damage and choices must influence what science is still possible.
+  let missionFailureRecovered = false;
+  for (const dp of decisionPoints) {
+    const scenario2 = dp.scenario!;
+    const opts = SCENARIO_DEFINITIONS[scenario2].decisionOptions;
+    const fixed = options.fixedDecisions?.[dp.id];
+    const idx = fixed !== undefined ? fixed : 0;
+    const chosen = opts[Math.min(idx, opts.length - 1)];
+    applyEffect(chosen.effects);
+    // The emergency-recovery attempt can save a cascade failure, but only for
+    // designs that had baseline quality to begin with.
+    if (scenario2 === 'mission-failure' && idx === 1 && f.overall >= 35) missionFailureRecovered = true;
+    decisions.push({
+      eventId: dp.id, eventTitle: dp.title, optionLabel: chosen.label,
+      optionIndex: Math.min(idx, opts.length - 1),
+      consequence: chosen.consequence, effects: chosen.effects,
+      atProgress: dp.atProgress, kind: 'player',
+    });
+  }
+
+  // Resolve autonomy: fixed choice, or default to 'continue-science'.
+  if (autonomyPoint) {
+    const choice = options.autonomy ?? 'continue-science';
+    const autonomyOutcome = resolveAutonomy(choice, f, systems);
+    applyEffect(autonomyOutcome.effects);
+    decisions.push({
+      eventId: autonomyPoint.id, eventTitle: autonomyPoint.title,
+      optionLabel: autonomyOutcome.label,
+      optionIndex: 0,
+      consequence: autonomyOutcome.description,
+      effects: autonomyOutcome.effects,
+      atProgress: autonomyPoint.atProgress, kind: 'autonomy',
     });
   }
 
@@ -392,17 +478,6 @@ export function runMission(
     dataStoredGb += batch.reduce((s, d) => s + dataGbForDiscovery(mission, d.discoveryId), 0);
   }
 
-  // ── Autonomy decision point (comm interruptions) ─────────────────────────
-  if (scenario === 'comm-interrupted' || (f.commSuitable === false && f.destDistance >= 1) || (delayInfo && delayInfo.lightTime.seconds > 300)) {
-    const ev = addEvent({
-      atProgress: 72, type: 'warning', title: 'Communication gap',
-      message: `The link with Earth drops during ${destLabel} operations. The spacecraft must act on its own for the next contact window.`,
-      cause: 'Signal delay and antenna margin make continuous contact impossible for this design.',
-      autonomyPrompt: true,
-    });
-    autonomyPoint = ev;
-  }
-
   // ── Downlink phase ───────────────────────────────────────────────────────
   const lightTime = mission.destination
     ? computeLightTime(getCommDelayInfo(mission.destination).representativeDistanceKm)
@@ -413,45 +488,50 @@ export function runMission(
   });
 
   // ── Failure / early end evaluation ───────────────────────────────────────
+  // Evaluated AFTER scenario damage + decisions + autonomy, so the check sees
+  // the mission's real state instead of pristine 100% systems.
   const criticalSystems = (['power', 'propulsion', 'communication', 'instruments'] as const).filter(k => systems[k] <= 8);
-  const endedEarly = criticalSystems.length >= 2 || systems.power <= 0;
-  const endProgress = endedEarly ? Math.min(...criticalSystems.length > 0 ? [70 + Math.round(rand.range(0, 15))] : [100], 100) : 100;
+  let endedEarly = criticalSystems.length >= 2 || systems.power <= 0;
+  // A cascade-failure scenario is mission-ending unless the emergency recovery
+  // attempt was made and the design had baseline quality to survive it.
+  if (scenario === 'mission-failure' && !missionFailureRecovered) endedEarly = true;
+  const endProgress = endedEarly ? 70 + Math.round(rand.range(0, 15)) : 100;
 
   if (endedEarly) {
     addEvent({
       atProgress: endProgress, type: 'danger', title: 'Mission-ending anomaly',
-      message: `Multiple systems critical (${criticalSystems.join(', ')}). Autonomous safing placed the spacecraft in a survival configuration.`,
+      message: criticalSystems.length > 0
+        ? `Multiple systems critical (${criticalSystems.join(', ')}). Autonomous safing placed the spacecraft in a survival configuration.`
+        : 'Cascading anomalies overwhelmed recovery capability. Autonomous safing placed the spacecraft in a survival configuration.',
       cause: 'When a design carries too little margin, a single event can cascade into mission loss.',
     });
   }
 
-  // ── Resolve decisions (fixed or auto 'balanced') ─────────────────────────
-  for (const dp of decisionPoints) {
-    const scenario2 = dp.scenario!;
-    const opts = SCENARIO_DEFINITIONS[scenario2].decisionOptions;
-    const fixed = options.fixedDecisions?.[dp.id];
-    const idx = fixed !== undefined ? fixed : 0;
-    const chosen = opts[Math.min(idx, opts.length - 1)];
-    applyEffect(chosen.effects);
-    decisions.push({
-      eventId: dp.id, eventTitle: dp.title, optionLabel: chosen.label,
-      consequence: chosen.consequence, effects: chosen.effects,
-      atProgress: dp.atProgress, kind: 'player',
-    });
-  }
+  // ── Passive strain from over-constrained designs ─────────────────────────
+  // Even a "smooth" scenario is not free for a badly-matched design: a solar
+  // system at Neptune is straining from launch onward. No drama — just honest
+  // cumulative cost across the cruise, exactly how constrained missions fly.
+  if (f.worstFit < 45 && !endedEarly) {
+    const strain = Math.round((45 - f.worstFit) * 0.4);             // up to ~18 pts per phase
+    const strainedSystems: Partial<SystemStatus> = {};
+    const strainTarget = f.scores.powerCompatibility === f.worstFit
+      ? 'power'
+      : f.scores.communication === f.worstFit ? 'communication' : 'propulsion';
+    strainedSystems[strainTarget as keyof SystemStatus] = -strain;
 
-  // Resolve autonomy: fixed choice, or default to 'continue-science'.
-  let autonomyOutcome: AutonomyOutcome | null = null;
-  if (autonomyPoint) {
-    const choice = options.autonomy ?? 'continue-science';
-    autonomyOutcome = resolveAutonomy(choice, f, systems);
-    applyEffect(autonomyOutcome.effects);
-    decisions.push({
-      eventId: autonomyPoint.id, eventTitle: autonomyPoint.title,
-      optionLabel: autonomyOutcome.label,
-      consequence: autonomyOutcome.description,
-      effects: autonomyOutcome.effects,
-      atProgress: autonomyPoint.atProgress, kind: 'autonomy',
+    [{ at: 25 }, { at: 45 }, { at: 65 }].forEach(({ at }, phase) => {
+      if (systems[strainTarget as 'power' | 'communication' | 'propulsion'] <= 0) return;
+      applyEffect(strainedSystems);
+      if (phase === 2) {
+        addEvent({
+          atProgress: at, type: 'info', title: 'Design strain',
+          message: `Long cruise on a stressed subsystem: your ${
+            strainTarget === 'power' ? 'power system' : strainTarget === 'communication' ? 'communication link' : 'propulsion'
+          } was sized too close to the edge for ${destLabel}. Reserves are far below plan.`,
+          cause: 'No single failure — just a design choice that cost margin every day of the journey. That is what "matching the system to the destination" means in practice.',
+          systemEffect: strainedSystems,
+        });
+      }
     });
   }
 
@@ -460,7 +540,7 @@ export function runMission(
   const dataReturnedGb = Math.round(dataStoredGb * Math.min(1, 0.12 + commFactor * 0.85));
 
   // ── Outcome determination ────────────────────────────────────────────────
-  const outcomes = determineOutcome(mission, scenario, systems, endedEarly, f);
+  const outcomes = determineOutcome(mission, scenario, systems, endedEarly, f, damageTaken, missionFailureRecovered);
   const scienceReturn = buildScienceReturnForRecord(mission, discoveries, {
     instrumentHealth: systems.instruments,
     communicationHealth: systems.communication,
@@ -475,7 +555,7 @@ export function runMission(
   const recommendations = buildRecommendations(mission, scenario, systems, f);
 
   const commLabel = mission.destination ? DESTINATIONS[mission.destination].label : '';
-  const failureInvestigation = endedEarly || scenario === 'partial-success' || outcomes.type === 'partial'
+  const failureInvestigation = endedEarly || scenario === 'partial-success' || scenario === 'mission-failure' || outcomes.type === 'partial'
     ? buildInvestigation(mission, scenario, systems)
     : null;
 
@@ -489,6 +569,7 @@ export function runMission(
     decisions,
     discoveries,
     finalSystems: { ...systems },
+    damageTaken,
     dataStoredGb,
     dataReturnedGb,
     observationsCompleted: observations,
@@ -622,7 +703,9 @@ function determineOutcome(
   scenario: ScenarioType,
   systems: SystemStatus,
   endedEarly: boolean,
-  f: ReturnType<typeof configurationFactors>
+  f: ReturnType<typeof configurationFactors>,
+  damageTaken: number,
+  missionFailureRecovered: boolean
 ): SimulationRecord['outcomes'] {
   const destLabel = mission.destination ? DESTINATIONS[mission.destination].label : 'the destination';
   const objLabel = mission.objective ? mission.objective.replace(/-/g, ' ') : 'science';
@@ -637,6 +720,13 @@ function determineOutcome(
   }
 
   const avgHealth = (systems.power + systems.communication + systems.propulsion + systems.instruments + systems.navigation) / 5;
+  // The weakest system matters as much as the average: a mission that kept four
+  // systems healthy but ran one near the floor is a different story than one
+  // that coasted at 95% across the board.
+  const criticalHealth = Math.min(systems.power, systems.communication, systems.propulsion, systems.instruments, systems.navigation);
+  // A survived cascade failure (or a constrained-operations scenario) is not a
+  // clean success — the design was found wanting, however well the crew coped.
+  const cappedByScenario = scenario === 'partial-success' || (scenario === 'mission-failure' && missionFailureRecovered);
 
   if (scenario === 'science-breakthrough' && avgHealth > 55) {
     return {
@@ -647,7 +737,39 @@ function determineOutcome(
     };
   }
 
-  if (avgHealth >= 78 && !endedEarly) {
+  if (scenario === 'mission-failure' && missionFailureRecovered) {
+    return {
+      type: 'partial',
+      title: 'MISSION SURVIVED — AT A COST',
+      subtitle: `A cascade failure threatened ${mission.missionName || 'the mission'} near ${destLabel}; the emergency-recovery attempt held the spacecraft together.`,
+      explanation: 'Surviving a cascade failure is not a clean success. Recovery consumed reserves and mission time, so some objectives were cut to keep the spacecraft alive.',
+    };
+  }
+
+  // Missions that absorbed heavy system stress land one tier below their raw
+  // health: a run that fought through serious damage is a with-challenges story
+  // even if every gauge recovered. Light trouble that left full margins intact
+  // can still rate a clean success — that is what margin is FOR.
+  const heavyDamage = damageTaken >= 90;
+
+  if (cappedByScenario) {
+    if (avgHealth >= 70 && criticalHealth >= 45) {
+      return {
+        type: 'success-challenges',
+        title: 'MISSION SUCCESSFUL — WITH CHALLENGES',
+        subtitle: `Multiple subsystems ran near their limits during ${destLabel} operations; objectives were reprioritized to protect the core science plan.`,
+        explanation: 'The mission survived by spending margin. Systems were sized close to their limits, so reality forced real-time adaptation.',
+      };
+    }
+    return {
+      type: 'partial',
+      title: 'MISSION PARTIALLY SUCCESSFUL',
+      subtitle: `Your mission reached ${destLabel} but operational constraints forced objective changes.`,
+      explanation: 'The mission survived but the science plan shrank. Partial success is common in real spaceflight — and informative.',
+    };
+  }
+
+  if (!heavyDamage && avgHealth >= 78 && criticalHealth >= 65) {
     return {
       type: 'success',
       title: 'MISSION SUCCESSFUL',
@@ -656,12 +778,16 @@ function determineOutcome(
     };
   }
 
-  if (avgHealth >= 55) {
+  if (avgHealth >= 55 && criticalHealth >= 30) {
     return {
       type: 'success-challenges',
       title: 'MISSION SUCCESSFUL — WITH CHALLENGES',
-      subtitle: `Your mission overcame significant challenges to achieve its primary objectives at ${destLabel}.`,
-      explanation: 'The design absorbed real problems without losing the mission — the practical definition of good margin.',
+      subtitle: heavyDamage
+        ? `The ${objLabel} mission completed its objectives at ${destLabel} after absorbing significant system stress en route.`
+        : `Your mission overcame significant challenges to achieve its primary objectives at ${destLabel}.`,
+      explanation: heavyDamage
+        ? 'Damage was taken and recovered from — but the mission spent reserves to do it. Design margin, not luck, is what kept this from going worse.'
+        : 'The design absorbed real problems without losing the mission — the practical definition of good margin.',
     };
   }
 
