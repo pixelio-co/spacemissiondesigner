@@ -3,6 +3,9 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { COMMUNICATION_SYSTEMS, DESTINATIONS, type Communication } from '@/lib/missionData';
+import { COMMUNICATION_EDUCATION } from '@/lib/missionRules';
+import { getCommDelayInfo } from '@/lib/spaceData';
+import OptionEducationBlock from './OptionEducationBlock';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -21,14 +24,21 @@ export default function Stage7Communication({ store }: Props) {
         </p>
       </div>
 
-      {destInfo && (
-        <div className="p-3 rounded-lg bg-warning/10 border border-warning/30">
-          <p className="text-xs text-warning/90">
-            <strong>Signal delay to {destInfo.label}:</strong> {destInfo.communicationDelay} one-way.
-            {['outer', 'deep'].includes(destInfo.distanceCategory) && ' A high-gain or deep-space antenna is strongly recommended.'}
-          </p>
-        </div>
-      )}
+      {destInfo && (() => {
+        const delay = getCommDelayInfo(mission.destination!);
+        return (
+          <div className="p-3 rounded-lg bg-warning/10 border border-warning/30">
+            <p className="text-xs text-warning/90">
+              <strong>Signal delay to {destInfo.label}:</strong> at a representative distance of{' '}
+              {Math.round(delay.representativeDistanceKm / 1e6)} million km, one-way light-time is{' '}
+              <strong className="font-mono">{delay.lightTime.formatted}</strong> — computed from real
+              distance data ÷ the speed of light.
+              {['outer', 'deep'].includes(destInfo.distanceCategory) && ' A high-gain or deep-space antenna is strongly recommended.'}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-1 italic">{delay.distanceNote}</p>
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {(Object.entries(COMMUNICATION_SYSTEMS) as [Communication, typeof COMMUNICATION_SYSTEMS[Communication]][]).map(([key, comm]) => {
@@ -80,11 +90,18 @@ export default function Stage7Communication({ store }: Props) {
 
       <div className="p-4 rounded-lg bg-muted/30 border border-border">
         <p className="text-xs text-muted-foreground leading-relaxed">
-          <strong className="text-foreground">About signal delay:</strong> Radio waves travel at the speed of light (~300,000 km/s).
+          <strong className="text-foreground">About signal delay:</strong> Radio waves travel at the speed of light (~299,792 km/s).
           Even at this speed, a signal to Mars takes 3–22 minutes one-way — making real-time control impossible.
           Spacecraft must be designed to operate autonomously during communication gaps.
         </p>
       </div>
+
+      {mission.communication && (
+        <OptionEducationBlock
+          education={COMMUNICATION_EDUCATION[mission.communication]}
+          optionLabel={COMMUNICATION_SYSTEMS[mission.communication].label}
+        />
+      )}
     </div>
   );
 }

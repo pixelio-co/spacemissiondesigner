@@ -3,6 +3,10 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { POWER_SYSTEMS, DESTINATIONS, type Power } from '@/lib/missionData';
+import { POWER_EDUCATION } from '@/lib/missionRules';
+import { DESTINATION_FACTS } from '@/lib/spaceData';
+import OptionEducationBlock from './OptionEducationBlock';
+import InfoExpand from '@/components/ui/InfoExpand';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -11,23 +15,32 @@ interface Props {
 export default function Stage6Power({ store }: Props) {
   const { mission, updatePower } = store;
   const destInfo = mission.destination ? DESTINATIONS[mission.destination] : null;
+  const destFacts = mission.destination ? DESTINATION_FACTS[mission.destination] : null;
 
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-bold text-foreground mb-1">Power System</h2>
         <p className="text-sm text-muted-foreground">
-          How will your spacecraft generate electricity? Your destination strongly affects which power system is suitable.
+          Choose how your spacecraft gets energy. Your destination strongly affects which power
+          system can do the job.
         </p>
       </div>
 
-      {destInfo && (
+      {destInfo && destFacts && (
         <div className="p-3 rounded-lg bg-info/10 border border-info/30">
           <p className="text-xs text-info/90">
-            <strong>Destination note:</strong> {destInfo.label} is a <strong>{destInfo.distanceCategory}</strong> destination.
-            {['outer', 'deep'].includes(destInfo.distanceCategory) && ' Solar power is significantly reduced at this distance — consider RPS.'}
-            {['near', 'inner'].includes(destInfo.distanceCategory) && ' Solar power is viable at this distance.'}
+            <strong>{destInfo.label}</strong> orbits at {destFacts.distanceFromSunAu} AU from the Sun.
+            Sunlight there provides about <strong>{destFacts.solarIlluminationPercentOfEarth}%</strong> of
+            what a panel receives at Earth (inverse-square law).
+            {['outer', 'deep'].includes(destInfo.distanceCategory) && ' This is why real missions this far out choose radioisotope power.'}
+            {['near', 'inner'].includes(destInfo.distanceCategory) && ' Solar power is generally viable at this distance.'}
           </p>
+          <InfoExpand title="Why does sunlight fade with distance?" icon="idea">
+            Light spreads out as it travels, so the energy passing through a given area drops with the
+            <strong> square</strong> of the distance. Double the distance from the Sun → one quarter the
+            sunlight. At 10 AU (Saturn) a panel collects ~1% of what it would at Earth.
+          </InfoExpand>
         </div>
       )}
 
@@ -81,6 +94,13 @@ export default function Stage6Power({ store }: Props) {
           );
         })}
       </div>
+
+      {mission.power && (
+        <OptionEducationBlock
+          education={POWER_EDUCATION[mission.power]}
+          optionLabel={POWER_SYSTEMS[mission.power].label}
+        />
+      )}
     </div>
   );
 }

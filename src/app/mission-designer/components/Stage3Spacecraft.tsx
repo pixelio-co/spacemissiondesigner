@@ -3,6 +3,8 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { SPACECRAFT_TYPES, DESTINATIONS, type SpacecraftType } from '@/lib/missionData';
+import { SPACECRAFT_EDUCATION } from '@/lib/missionRules';
+import OptionEducationBlock from './OptionEducationBlock';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -124,13 +126,19 @@ export default function Stage3Spacecraft({ store }: Props) {
       </div>
 
       {mission.spacecraft && (
-        <div className="p-4 rounded-lg bg-success/10 border border-success/30 animate-fadeIn">
-          <p className="text-xs text-success/90">
-            <strong>{SPACECRAFT_TYPES[mission.spacecraft].label}</strong> selected —
-            payload capacity: {SPACECRAFT_TYPES[mission.spacecraft].payloadCapacity} kg,
-            max {SPACECRAFT_TYPES[mission.spacecraft].maxInstruments} instruments.
-          </p>
-        </div>
+        <>
+          <div className="p-4 rounded-lg bg-success/10 border border-success/30 animate-fadeIn">
+            <p className="text-xs text-success/90">
+              <strong>{SPACECRAFT_TYPES[mission.spacecraft].label}</strong> selected —
+              payload capacity: {SPACECRAFT_TYPES[mission.spacecraft].payloadCapacity} kg,
+              max {SPACECRAFT_TYPES[mission.spacecraft].maxInstruments} instruments.
+            </p>
+          </div>
+          <OptionEducationBlock
+            education={SPACECRAFT_EDUCATION[mission.spacecraft]}
+            optionLabel={SPACECRAFT_TYPES[mission.spacecraft].label}
+          />
+        </>
       )}
     </div>
   );

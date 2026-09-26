@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import type { SystemStatus } from './SimulationClient';
+import type { SystemStatus } from '@/lib/simTypes';
 import { Zap, Radio, Navigation, FlaskConical, Shield, Compass } from 'lucide-react';
 import Icon from '@/components/ui/AppIcon';
 
@@ -57,7 +57,7 @@ export default function SystemGauges({ systems }: Props) {
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
         {gaugeConfig.map(({ key, label, icon: Icon, inverted }) => {
           const value = systems[key];
-          const displayValue = inverted ? value : value;
+          const displayValue = value;
           const barColor = inverted
             ? (value < 20 ? 'bg-success' : value < 50 ? 'bg-warning' : 'bg-danger')
             : gaugeColor(value);
@@ -71,7 +71,7 @@ export default function SystemGauges({ systems }: Props) {
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`pulse-dot ${statusColor(value, key).replace('text-', '')}`}
-                    style={{ background: value >= 80 && key !== 'radiation' ? 'var(--success)' : value >= 50 && key !== 'radiation' ? 'var(--warning)' : 'var(--danger)' }}
+                    style={{ background: value >= 80 && !inverted ? 'var(--success)' : value >= 50 && !inverted ? 'var(--warning)' : 'var(--danger)' }}
                   />
                   <span className={`text-xs font-mono font-bold ${statusColor(value, key)}`}>
                     {statusLabel(value, key)}

@@ -3,6 +3,8 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { PROPULSION_SYSTEMS, DESTINATIONS, type Propulsion } from '@/lib/missionData';
+import { PROPULSION_EDUCATION } from '@/lib/missionRules';
+import OptionEducationBlock from './OptionEducationBlock';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -89,6 +91,13 @@ export default function Stage5Propulsion({ store }: Props) {
           );
         })}
       </div>
+
+      {mission.propulsion && (
+        <OptionEducationBlock
+          education={PROPULSION_EDUCATION[mission.propulsion]}
+          optionLabel={PROPULSION_SYSTEMS[mission.propulsion].label}
+        />
+      )}
     </div>
   );
 }

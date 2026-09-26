@@ -33,7 +33,8 @@ export default function AppFooter() {
               {[
                 { label: 'Home', href: '/', icon: Rocket },
                 { label: 'Mission Designer', href: '/mission-designer', icon: Rocket },
-                { label: 'Mission Simulation', href: '/mission-simulation-screen', icon: Rocket },
+                { label: 'Learn', href: '/learn', icon: Rocket },
+                { label: 'About & Data Sources', href: '/about', icon: Rocket },
               ]?.map((item) => {
                 const Icon = item?.icon;
                 return (

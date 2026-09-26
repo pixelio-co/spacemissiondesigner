@@ -8,6 +8,10 @@ import {
   PROPULSION_SYSTEMS, POWER_SYSTEMS, COMMUNICATION_SYSTEMS, getOverallScore
 } from '@/lib/missionData';
 import { CheckCircle, AlertTriangle, XCircle } from 'lucide-react';
+import ArchitectureDiagram from '@/components/ui/ArchitectureDiagram';
+import SolarSystemView from '@/components/ui/SolarSystemView';
+import MissionDna from '@/components/ui/MissionDna';
+import { computeMissionDna } from '@/lib/missionRules';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -23,6 +27,7 @@ function ScoreIcon({ score }: { score: number }) {
 export default function Stage8Review({ store, scores }: Props) {
   const { mission } = store;
   const overall = getOverallScore(scores);
+  const dna = computeMissionDna(mission);
 
   const reviewItems = [
     {
@@ -159,6 +164,15 @@ export default function Stage8Review({ store, scores }: Props) {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Mission architecture — the whole system at a glance */}
+      <ArchitectureDiagram mission={mission} compact />
+
+      {/* Solar system position + Mission DNA summary side by side */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+        <SolarSystemView destination={mission.destination} progress={100} phaseLabel="Planned trajectory" />
+        <MissionDna dna={dna} compact />
       </div>
 
       <div className="p-4 rounded-lg bg-accent/10 border border-accent/30">

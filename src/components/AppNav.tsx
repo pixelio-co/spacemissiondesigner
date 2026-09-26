@@ -11,9 +11,8 @@ import Icon from '@/components/ui/AppIcon';
 const navItems = [
   { label: 'Home', href: '/', icon: Rocket },
   { label: 'Mission Designer', href: '/mission-designer', icon: Satellite },
-  { label: 'Simulation', href: '/mission-simulation-screen', icon: Satellite },
-  { label: 'Learn', href: '#learn', icon: BookOpen },
-  { label: 'About', href: '#about', icon: Info },
+  { label: 'Learn', href: '/learn', icon: BookOpen },
+  { label: 'About', href: '/about', icon: Info },
 ];
 
 export default function AppNav() {

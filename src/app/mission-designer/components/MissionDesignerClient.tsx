@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useMissionStore } from '@/lib/missionStore';
 import { calculateMissionScores, MISSION_STAGES } from '@/lib/missionData';
+import { computeMissionDna, getAdvisorInsights } from '@/lib/missionRules';
 import ProgressBar from './ProgressBar';
 import MissionStatusPanel from './MissionStatusPanel';
 import AnalysisPanel from './AnalysisPanel';
@@ -17,15 +18,23 @@ import Stage5Propulsion from './Stage5Propulsion';
 import Stage6Power from './Stage6Power';
 import Stage7Communication from './Stage7Communication';
 import Stage8Review from './Stage8Review';
-import { ChevronLeft, ChevronRight, Rocket } from 'lucide-react';
+import MissionDna from '@/components/ui/MissionDna';
+import MissionAdvisor from '@/components/ui/MissionAdvisor';
+import WhatIfLab from '@/components/ui/WhatIfLab';
+import { ChevronLeft, ChevronRight, Rocket, Dna, Sparkles, FlaskConical, BarChart3 } from 'lucide-react';
+
+type RightTab = 'analysis' | 'dna' | 'advisor' | 'lab';
 
 export default function MissionDesignerClient() {
   const router = useRouter();
   const store = useMissionStore();
   const { mission, completeStage, goToStage, resetMission, getProgressPercent } = store;
+  const [rightTab, setRightTab] = useState<RightTab>('dna');
 
   const scores = calculateMissionScores(mission);
   const progress = getProgressPercent();
+  const dna = useMemo(() => computeMissionDna(mission), [mission]);
+  const advisorInsights = useMemo(() => getAdvisorInsights(mission), [mission]);
 
   const canAdvance = useCallback((): boolean => {
     const stage = mission.currentStage;
@@ -47,7 +56,10 @@ export default function MissionDesignerClient() {
       return;
     }
     if (mission.currentStage === 8) {
-      // Launch — navigate to simulation
+      // Launch — navigate to simulation. The draft is NOT cleared here (that
+      // would repaint this page at stage 0 mid-navigation); the simulation
+      // screen clears the stored draft once it mounts. The mission itself is
+      // fully encoded in the URL params, so nothing is lost.
       const params = new URLSearchParams({
         missionName: mission.missionName || 'Mission Alpha',
         objective: mission.objective ?? '',
@@ -160,9 +172,41 @@ export default function MissionDesignerClient() {
           </div>
         </div>
 
-        {/* Right: Analysis */}
+        {/* Right: Analysis tabs — DNA / Advisor / What-If / Scores */}
         <div className="lg:block">
-          <AnalysisPanel scores={scores} mission={mission} />
+          <div className="sticky top-24 space-y-3">
+            <div className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-card border border-border">
+              {([
+                { key: 'dna' as const, label: 'DNA', icon: Dna },
+                { key: 'advisor' as const, label: 'Advisor', icon: Sparkles },
+                { key: 'lab' as const, label: 'Lab', icon: FlaskConical },
+                { key: 'analysis' as const, label: 'Scores', icon: BarChart3 },
+              ]).map(tab => {
+                const Icon = tab.icon;
+                return (
+                  <button
+                    key={`tab-${tab.key}`}
+                    type="button"
+                    onClick={() => setRightTab(tab.key)}
+                    className={`flex flex-col items-center gap-0.5 py-2 rounded-md text-[10px] font-medium uppercase tracking-wide transition-colors ${
+                      rightTab === tab.key
+                        ? 'bg-primary/15 text-primary'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={rightTab === tab.key}
+                  >
+                    <Icon size={13} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {rightTab === 'dna' && <MissionDna dna={dna} />}
+            {rightTab === 'advisor' && <MissionAdvisor insights={advisorInsights} />}
+            {rightTab === 'lab' && <WhatIfLab mission={mission} />}
+            {rightTab === 'analysis' && <AnalysisPanel scores={scores} mission={mission} />}
+          </div>
         </div>
       </div>
     </div>

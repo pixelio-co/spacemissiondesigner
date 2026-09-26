@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type {
   MissionState,
   MissionObjective,
@@ -11,6 +11,7 @@ import type {
   Power,
   Communication,
 } from './missionData';
+import { loadActiveMission, saveActiveMission, clearActiveMission } from './missionHistory';
 
 export const DEFAULT_MISSION_STATE: MissionState = {
   missionName: '',
@@ -26,7 +27,30 @@ export const DEFAULT_MISSION_STATE: MissionState = {
 };
 
 export function useMissionStore() {
-  const [mission, setMission] = useState<MissionState>({ ...DEFAULT_MISSION_STATE });
+  const [mission, setMission] = useState<MissionState>(() => {
+    // Restore an in-progress design across navigations (SSR-safe: on the
+    // server this returns the default; hydration re-syncs below).
+    if (typeof window !== 'undefined') {
+      return loadActiveMission() ?? { ...DEFAULT_MISSION_STATE };
+    }
+    return { ...DEFAULT_MISSION_STATE };
+  });
+  const hydratedRef = useRef(false);
+
+  // Re-sync after hydration in case the first render used defaults.
+  useEffect(() => {
+    if (hydratedRef.current) return;
+    hydratedRef.current = true;
+    const stored = loadActiveMission();
+    if (stored) {
+      setMission(prev => ({ ...prev, ...stored }));
+    }
+  }, []);
+
+  // Persist every change so the design survives navigation and refreshes.
+  useEffect(() => {
+    saveActiveMission(mission);
+  }, [mission]);
 
   const updateMissionName = useCallback((name: string) => {
     setMission(prev => ({ ...prev, missionName: name }));
@@ -87,6 +111,7 @@ export function useMissionStore() {
 
   const resetMission = useCallback(() => {
     setMission({ ...DEFAULT_MISSION_STATE });
+    clearActiveMission();
   }, []);
 
   const getProgressPercent = useCallback(() => {

@@ -1,26 +1,19 @@
 'use client';
 
 import React from 'react';
-import { AlertTriangle } from 'lucide-react';
-
-interface DecisionOption {
-  label: string;
-  consequence: string;
-  effect: Record<string, number>;
-}
-
-interface DecisionPrompt {
-  title: string;
-  description: string;
-  options: DecisionOption[];
-}
+import { AlertTriangle, Info } from 'lucide-react';
+import type { MissionEvent } from '@/lib/simulationEngine';
+import { SCENARIO_DEFINITIONS } from '@/lib/simTypes';
 
 interface Props {
-  prompt: DecisionPrompt;
-  onDecide: (index: number) => void;
+  event: MissionEvent;
+  onDecide: (index: number, educationalWhy: string) => void;
 }
 
-export default function DecisionModal({ prompt, onDecide }: Props) {
+export default function DecisionModal({ event, onDecide }: Props) {
+  const def = event.scenario ? SCENARIO_DEFINITIONS[event.scenario] : null;
+  const options = def?.decisionOptions ?? [];
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
@@ -28,27 +21,37 @@ export default function DecisionModal({ prompt, onDecide }: Props) {
       aria-modal="true"
       aria-labelledby="decision-modal-title"
     >
-      <div className="space-card border-warning/50 border-2 p-6 max-w-lg w-full animate-slideUp">
+      <div className="space-card border-warning/50 border-2 p-6 max-w-xl w-full max-h-[90vh] overflow-y-auto animate-slideUp">
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-warning/20 flex items-center justify-center flex-shrink-0">
             <AlertTriangle size={20} className="text-warning" />
           </div>
           <div>
             <h2 id="decision-modal-title" className="text-base font-bold text-warning font-mono tracking-wider">
-              {prompt.title}
+              {event.title.toUpperCase()}
             </h2>
             <div className="text-xs text-muted-foreground">Mission Decision Required</div>
           </div>
         </div>
 
-        <p className="text-sm text-foreground mb-6 leading-relaxed">{prompt.description}</p>
+        <p className="text-sm text-foreground mb-3 leading-relaxed">{event.message}</p>
+
+        {event.cause && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-info/5 border border-info/20 mb-5">
+            <Info size={12} className="text-info mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              <span className="text-info font-semibold">Why this is happening: </span>
+              {event.cause}
+            </p>
+          </div>
+        )}
 
         <div className="space-y-3">
-          {prompt.options.map((option, idx) => (
+          {options.map((option, idx) => (
             <button
-              key={`decision-option-${idx}`}
+              key={`decision-option-${event.id}-${idx}`}
               type="button"
-              onClick={() => onDecide(idx)}
+              onClick={() => onDecide(idx, option.educationalWhy)}
               className="decision-card p-4 w-full text-left"
             >
               <div className="flex items-start gap-3">
@@ -60,6 +63,7 @@ export default function DecisionModal({ prompt, onDecide }: Props) {
                 <div>
                   <div className="text-sm font-semibold text-foreground mb-1">{option.label}</div>
                   <div className="text-xs text-muted-foreground">{option.consequence}</div>
+                  <div className="text-[10px] text-info/80 italic mt-1">{option.educationalWhy}</div>
                 </div>
               </div>
             </button>
@@ -67,7 +71,7 @@ export default function DecisionModal({ prompt, onDecide }: Props) {
         </div>
 
         <p className="text-xs text-muted-foreground mt-4 text-center">
-          Your decision will affect mission outcomes. Choose carefully.
+          Every option is a real trade-off — mission planners rank objectives before flight for moments like this.
         </p>
       </div>
     </div>

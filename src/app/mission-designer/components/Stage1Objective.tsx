@@ -3,7 +3,7 @@
 import React from 'react';
 
 import { OBJECTIVES, type MissionObjective } from '@/lib/missionData';
-import { useMissionStore } from '../../../lib/useMissionStore';
+import type { useMissionStore } from '@/lib/missionStore';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
