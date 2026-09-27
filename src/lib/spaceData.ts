@@ -1,639 +1,438 @@
 /**
- * SPACE DATA LAYER
- * ─────────────────────────────────────────────────────────────────────────────
- * A clean abstraction over real, publicly available space-agency data.
+ * spaceData.ts — Real space data abstraction layer
  *
- * DESIGN PRINCIPLES
- * 1. Every number carries its source. Nothing here is invented — static
- *    snapshots are taken from NASA / JPL public datasets and each dataset is
- *    registered in SPACE_DATA_SOURCES so the app can display provenance.
- * 2. Simple physics (light-time from distance + speed of light, solar
- *    illumination from the inverse-square law) is COMPUTED from verified
- *    data and labelled as such. Anything that is only a rough educational
- *    model is labelled "educational estimate".
- * 3. No live-API dependency. If live APIs are added later they plug into the
- *    same interfaces; the app works fully offline from these cached datasets.
- * ─────────────────────────────────────────────────────────────────────────────
+ * This module is the single place where externally-sourced space data enters
+ * the application. It currently serves STATIC educational datasets compiled
+ * from NASA's public Planetary Fact Sheets (NSSDCA) and NASA mission pages.
+ *
+ * DESIGN CONTRACT
+ * ---------------
+ * - Every value here is approximate and educational. It is NOT intended for
+ *   navigation or engineering. The app must keep working fully offline —
+ *   these datasets are bundled, cached constants, never live-only.
+ * - A live API adapter (e.g. NASA APIs) could be added later by implementing
+ *   the SpaceDataProvider interface below without touching app code.
+ * - Every dataset is registered in DATA_SOURCES so the About page can show
+ *   Source / Dataset / Used-for transparently.
+ *
+ * Primary sources (public, NASA):
+ * - NASA Planetary Fact Sheet (NSSDCA): https://nssdc.gsfc.nasa.gov/planetary/factsheet/
+ * - NASA Solar System Exploration: https://science.nasa.gov/solar-system/
+ * - NASA Deep Space Network: https://www.nasa.gov/dsn
+ * - Individual NASA/JPL mission pages (Voyager, Cassini, Juno, Perseverance, …)
  */
 
-import type { Destination } from './missionData';
-
-// ── Data source registry ─────────────────────────────────────────────────────
-
-export interface SpaceDataSource {
-  id: string;
-  provider: string;      // e.g. "NASA"
-  dataset: string;       // e.g. "Planetary Fact Sheet"
-  sourceUrl: string;
-  usedFor: string;       // what the app uses it for
-  nature: 'static snapshot' | 'computed from verified data' | 'educational estimate';
-}
-
-export const SPACE_DATA_SOURCES: SpaceDataSource[] = [
-  {
-    id: 'nasa-planetary-factsheet',
-    provider: 'NASA',
-    dataset: 'Planetary Fact Sheet (NSSDCA)',
-    sourceUrl: 'https://nssdc.gsfc.nasa.gov/planetary/factsheet/',
-    usedFor:
-      'Destination distances, orbital periods, gravity, temperature ranges, moon counts, and solar illumination baselines.',
-    nature: 'static snapshot',
-  },
-  {
-    id: 'nasa-moon-factsheet',
-    provider: 'NASA',
-    dataset: 'Moon Fact Sheet (NSSDCA)',
-    sourceUrl: 'https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html',
-    usedFor: 'Lunar distance from Earth, surface gravity, and lunar day/night temperatures.',
-    nature: 'static snapshot',
-  },
-  {
-    id: 'nasa-nea-asteroids',
-    provider: 'NASA / JPL',
-    dataset: 'Solar System Dynamics — Small-Body Database (Ceres, Bennu, Eros, Psyche)',
-    sourceUrl: 'https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html',
-    usedFor: 'Asteroid destination reference facts (sizes, distances, example exploration missions).',
-    nature: 'static snapshot',
-  },
-  {
-    id: 'light-time-physics',
-    provider: 'This project',
-    dataset: 'One-way light-time computation (distance ÷ 299,792.458 km/s)',
-    sourceUrl: 'https://science.nasa.gov/learn/speed-of-light/',
-    usedFor: 'Communication-delay demonstrations during the mission simulation.',
-    nature: 'computed from verified data',
-  },
-  {
-    id: 'mission-history',
-    provider: 'NASA / JPL mission archives',
-    dataset: 'Public mission fact pages (Voyager, Cassini, Juno, Perseverance, OSIRIS-REx, Dawn, …)',
-    sourceUrl: 'https://science.nasa.gov/missions/',
-    usedFor: 'Real-mission comparisons that show how past missions solved the same design trade-offs.',
-    nature: 'static snapshot',
-  },
-  {
-    id: 'game-models',
-    provider: 'This project',
-    dataset: 'Simplified educational models (Mission DNA, science return, event engine)',
-    sourceUrl: '',
-    usedFor:
-      'All scores, probabilities, and outcomes. Transparent teaching models — NOT engineering calculations.',
-    nature: 'educational estimate',
-  },
-];
-
-// ── Destination facts (NASA Planetary Fact Sheet snapshot) ───────────────────
+// ── Provider abstraction ─────────────────────────────────────────────────────
 
 export interface DestinationFacts {
-  /** Mean distance from the Sun, in millions of km (Earth-orbit uses ~1 AU). */
-  meanDistanceFromSunMkm: number;
-  distanceFromSunAu: number;
-  /** Distance range from Earth in millions of km (null for Earth orbit itself). */
-  distanceFromEarthMkm: { min: number; max: number } | null;
-  /** Surface gravity in m/s² (null for gas giants / orbit-only destinations). */
-  surfaceGravityMs2: number | null;
-  /** Mean surface or 1-bar-level temperature in °C. */
+  key: string;
+  label: string;
+  /** Average distance from the Sun, astronomical units (1 AU ≈ 149.6M km). */
+  distanceFromSunAu: number | null;
+  /** Average Earth–destination distance in millions of km (varies with orbits). */
+  earthDistanceMillionKm: string;
+  /** Equatorial (or surface) gravity, m/s². */
+  gravityMs2: number | null;
+  /** Mean surface or 1-bar temperature, °C (approximate). */
   meanTempC: number | null;
-  /** Notable temperature extremes in °C. */
-  tempExtremesC: string | null;
-  /** Confirmed natural satellites (as of the 2024 fact sheet snapshot). */
-  moons: number | null;
-  /** Orbital period around the Sun in Earth days (365.2 for Earth). */
-  orbitalPeriodDays: number | null;
-  /** Rotation period in hours. */
-  rotationPeriodHours: number | null;
-  /** Sunlight received relative to Earth orbit (inverse-square law, 100% at 1 AU). */
-  solarIlluminationPercentOfEarth: number;
-  /** Short radiation / environment note. */
-  radiationNote: string;
+  tempRangeC: string | null;
+  /** Solar irradiance at the body's average solar distance, W/m² (Earth = 1,361). */
+  solarIrradianceWm2: number | null;
+  orbitalPeriod: string;
+  dayLength: string;
+  moons: string;
+  atmosphere: string;
+  radiationNotes: string;
+  /** Midpoint of the Earth–body one-way light-time range, seconds. */
+  avgOneWayDelaySeconds: number;
+  /** Short real-mission context line. */
+  realMissionContext: string;
 }
 
-/**
- * Illumination relative to Earth orbit: (1 AU / d_AU)² × 100.
- * Exported so the UI can explain WHY solar power fades with distance.
- */
-export function solarIlluminationPercent(distanceAu: number): number {
-  const value = 100 / (distanceAu * distanceAu);
-  // Round to 1 decimal; >= 1% to whole numbers for readability.
-  return value >= 1 ? Math.round(value * 10) / 10 : Math.round(value * 100) / 100;
+export interface SpaceDataProvider {
+  getDestinationFacts(key: string): DestinationFacts | null;
+  listDestinationKeys(): string[];
+  getRealMissions(): RealMission[];
+  getDataSources(): DataSource[];
 }
 
-export const DESTINATION_FACTS: Record<Destination, DestinationFacts> = {
+// ── Light-time helpers (transparent, derived from distance ÷ c) ──────────────
+
+export const LIGHT_SPEED_KM_S = 299_792.458;
+/** Light travels 1 AU in ≈ 499.0 seconds (≈ 8.32 min). */
+export const LIGHT_TIME_ONE_AU_S = 499.005;
+
+export function formatDelay(seconds: number): string {
+  if (seconds < 0.5) return '< 0.5 s';
+  if (seconds < 90) return `≈ ${seconds.toFixed(1).replace(/\.0$/, '')} s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s > 0 ? `≈ ${m} min ${s} s` : `≈ ${m} min`;
+}
+
+export function formatDuration(minutes: number): string {
+  if (minutes < 1) return '< 1 min';
+  if (minutes < 90) return `${Math.round(minutes)} min`;
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  return m > 0 ? `${h} h ${m} min` : `${h} h`;
+}
+
+// ── Static dataset: destination facts ────────────────────────────────────────
+// Values from NASA Planetary Fact Sheet (approximate averages; educational use).
+
+export const DESTINATION_FACTS: Record<string, DestinationFacts> = {
   'earth-orbit': {
-    meanDistanceFromSunMkm: 149.6,
+    key: 'earth-orbit',
+    label: 'Earth Orbit',
     distanceFromSunAu: 1.0,
-    distanceFromEarthMkm: null,
-    surfaceGravityMs2: 9.8,
+    earthDistanceMillionKm: '0.4–36 thousand km (altitude)',
+    gravityMs2: 9.8,
     meanTempC: 15,
-    tempExtremesC: '−65 °C to +50 °C (LEO thermal cycling every orbit)',
-    moons: null,
-    orbitalPeriodDays: 365.2,
-    rotationPeriodHours: 23.9,
-    solarIlluminationPercentOfEarth: 100,
-    radiationNote: 'Passes through South Atlantic Anomaly and outer Van Allen belt regions; shielding manageable.',
+    tempRangeC: 'varies by orbit & eclipse',
+    solarIrradianceWm2: 1361,
+    orbitalPeriod: '≈ 90 min (LEO) – 24 h (GEO)',
+    dayLength: '90 min to 24 h (orbital)',
+    moons: '— (orbiting Earth)',
+    atmosphere: 'Outer trace atmosphere in LEO; drag degrades low orbits over time',
+    radiationNotes: 'South Atlantic Anomaly & Van Allen belts raise radiation for some orbits',
+    avgOneWayDelaySeconds: 0.1,
+    realMissionContext: 'Hundreds of Earth-observation spacecraft operate here, e.g. NASA’s Landsat and Terra missions.',
   },
   'moon': {
-    meanDistanceFromSunMkm: 149.6,
+    key: 'moon',
+    label: 'The Moon',
     distanceFromSunAu: 1.0,
-    distanceFromEarthMkm: { min: 0.356, max: 0.407 },
-    surfaceGravityMs2: 1.6,
-    meanTempC: -20,
-    tempExtremesC: '−173 °C (night) to +127 °C (day) at the equator',
-    moons: null,
-    orbitalPeriodDays: 27.3, // around Earth
-    rotationPeriodHours: 655.7,
-    solarIlluminationPercentOfEarth: 100,
-    radiationNote: 'No atmosphere or magnetic field — solar particle events reach the surface unfiltered.',
+    earthDistanceMillionKm: '0.384 million km',
+    gravityMs2: 1.62,
+    meanTempC: -23,
+    tempRangeC: '−173 °C to +127 °C (equatorial surface)',
+    solarIrradianceWm2: 1361,
+    orbitalPeriod: '27.3 days around Earth',
+    dayLength: '≈ 29.5 Earth days (synchronous rotation)',
+    moons: '— (Earth’s natural satellite)',
+    atmosphere: 'Essentially none (exosphere) — extreme day/night temperature swings',
+    radiationNotes: 'No magnetic shielding; exposed to galactic cosmic rays and solar particle events',
+    avgOneWayDelaySeconds: 1.3,
+    realMissionContext: 'NASA’s Artemis campaign and the Apollo missions 1968–1972 explored the Moon; LRO still maps it today.',
   },
   'mercury': {
-    meanDistanceFromSunMkm: 57.9,
-    distanceFromSunAu: 0.39,
-    distanceFromEarthMkm: { min: 77, max: 222 },
-    surfaceGravityMs2: 3.7,
+    key: 'mercury',
+    label: 'Mercury',
+    distanceFromSunAu: 0.387,
+    earthDistanceMillionKm: '77–222 million km',
+    gravityMs2: 3.7,
     meanTempC: 167,
-    tempExtremesC: '−180 °C (night) to +430 °C (day)',
-    moons: 0,
-    orbitalPeriodDays: 88,
-    rotationPeriodHours: 1407.6,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(0.39),
-    radiationNote: 'No significant atmosphere; intense solar wind and radiation close to the Sun.',
+    tempRangeC: '−180 °C to +430 °C',
+    solarIrradianceWm2: 9088,
+    orbitalPeriod: '88 days',
+    dayLength: '≈ 176 Earth days (solar day)',
+    moons: '0',
+    atmosphere: 'Almost none (thin exosphere)',
+    radiationNotes: 'Intense solar radiation and heat near the Sun; weak magnetosphere',
+    avgOneWayDelaySeconds: 510,
+    realMissionContext: 'NASA’s MESSENGER orbited Mercury 2011–2015 behind a ceramic sunshade; ESA/JAXA’s BepiColombo arrives in 2026.',
   },
   'venus': {
-    meanDistanceFromSunMkm: 108.2,
-    distanceFromSunAu: 0.72,
-    distanceFromEarthMkm: { min: 38, max: 261 },
-    surfaceGravityMs2: 8.9,
+    key: 'venus',
+    label: 'Venus',
+    distanceFromSunAu: 0.723,
+    earthDistanceMillionKm: '38–261 million km',
+    gravityMs2: 8.9,
     meanTempC: 464,
-    tempExtremesC: '~464 °C day and night (thick atmosphere stores heat)',
-    moons: 0,
-    orbitalPeriodDays: 224.7,
-    rotationPeriodHours: -5832.5, // retrograde
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(0.72),
-    radiationNote: 'Dense CO₂ clouds deflect most sunlight before it reaches the surface; upper atmosphere is highly reflective.',
+    tempRangeC: '≈ 464 °C surface (hot enough to melt lead)',
+    solarIrradianceWm2: 2601,
+    orbitalPeriod: '225 days',
+    dayLength: '≈ 117 Earth days (solar day; retrograde rotation)',
+    moons: '0',
+    atmosphere: '96% CO₂ at 92 bar surface pressure; sulfuric-acid clouds',
+    radiationNotes: 'Dense atmosphere shields the surface but challenges balloons/entry systems',
+    avgOneWayDelaySeconds: 480,
+    realMissionContext: 'NASA’s Magellan mapped 98% of Venus with radar (1990–1994); DAVINCI and VERITAS are planned.',
   },
   'mars': {
-    meanDistanceFromSunMkm: 228.0,
-    distanceFromSunAu: 1.52,
-    distanceFromEarthMkm: { min: 54.6, max: 401 },
-    surfaceGravityMs2: 3.7,
+    key: 'mars',
+    label: 'Mars',
+    distanceFromSunAu: 1.524,
+    earthDistanceMillionKm: '54.6–401 million km',
+    gravityMs2: 3.71,
     meanTempC: -65,
-    tempExtremesC: '−153 °C (winter pole) to +20 °C (equator, noon)',
-    moons: 2,
-    orbitalPeriodDays: 687,
-    rotationPeriodHours: 24.6,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(1.52),
-    radiationNote: 'Thin atmosphere provides almost no shielding — surface radiation is similar to low Earth orbit above the belts.',
+    tempRangeC: '−153 °C to +20 °C',
+    solarIrradianceWm2: 586,
+    orbitalPeriod: '687 days',
+    dayLength: '24 h 37 min (a “sol”)',
+    moons: '2 (Phobos, Deimos)',
+    atmosphere: 'Thin CO₂ (≈ 0.6% of Earth’s pressure); planet-wide dust storms occur',
+    radiationNotes: 'No global magnetic field; surface radiation ≈ 50–100× Earth surface levels',
+    avgOneWayDelaySeconds: 750,
+    realMissionContext: 'NASA’s Perseverance rover and Ingenuity helicopter operate on Mars today; a fleet of orbiters relays data.',
   },
   'jupiter': {
-    meanDistanceFromSunMkm: 778.5,
-    distanceFromSunAu: 5.20,
-    distanceFromEarthMkm: { min: 588, max: 968 },
-    surfaceGravityMs2: 23.1,
+    key: 'jupiter',
+    label: 'Jupiter',
+    distanceFromSunAu: 5.203,
+    earthDistanceMillionKm: '588–968 million km',
+    gravityMs2: 23.1,
     meanTempC: -110,
-    tempExtremesC: 'Cloud-top temperature ~−145 °C',
-    moons: 95,
-    orbitalPeriodDays: 4331,
-    rotationPeriodHours: 9.9,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(5.2),
-    radiationNote: 'The most severe planetary radiation belts in the solar system — Europa Clipper carries titanium-shielded electronics.',
+    tempRangeC: '≈ −110 °C at 1-bar cloud level',
+    solarIrradianceWm2: 50.3,
+    orbitalPeriod: '11.9 years',
+    dayLength: '≈ 10 h (fastest planet rotation)',
+    moons: '95 confirmed (NASA, 2023)',
+    atmosphere: 'Hydrogen/helium; no solid surface; violent storms (Great Red Spot)',
+    radiationNotes: 'The most severe planetary radiation belts in the solar system — electronics need heavy shielding',
+    avgOneWayDelaySeconds: 2580,
+    realMissionContext: 'NASA’s Juno has orbited Jupiter since 2016 on solar power — the farthest solar-powered spacecraft at the time. Europa Clipper arrives in 2030.',
   },
   'saturn': {
-    meanDistanceFromSunMkm: 1432.0,
-    distanceFromSunAu: 9.57,
-    distanceFromEarthMkm: { min: 1200, max: 1660 },
-    surfaceGravityMs2: 9.0,
+    key: 'saturn',
+    label: 'Saturn',
+    distanceFromSunAu: 9.537,
+    earthDistanceMillionKm: '1.2–1.7 billion km',
+    gravityMs2: 9.0,
     meanTempC: -140,
-    tempExtremesC: 'Cloud-top temperature ~−178 °C',
-    moons: 146,
-    orbitalPeriodDays: 10747,
-    rotationPeriodHours: 10.7,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(9.57),
-    radiationNote: 'Radiation belts are much milder than Jupiter\'s, but still require care near the rings.',
+    tempRangeC: '≈ −140 °C at 1-bar cloud level',
+    solarIrradianceWm2: 15.0,
+    orbitalPeriod: '29.4 years',
+    dayLength: '≈ 10.7 h',
+    moons: '146 confirmed (NASA, 2023)',
+    atmosphere: 'Hydrogen/helium with ammonia haze; spectacular ring system',
+    radiationNotes: 'Moderate radiation belts; Titan has a thick nitrogen atmosphere, Enceladus vents water plumes',
+    avgOneWayDelaySeconds: 4560,
+    realMissionContext: 'NASA/ESA/ASI’s Cassini–Huygens orbited Saturn 2004–2017 on nuclear (RTG) power and landed on Titan.',
   },
   'uranus': {
-    meanDistanceFromSunMkm: 2867.0,
-    distanceFromSunAu: 19.17,
-    distanceFromEarthMkm: { min: 2570, max: 3150 },
-    surfaceGravityMs2: 8.7,
+    key: 'uranus',
+    label: 'Uranus',
+    distanceFromSunAu: 19.19,
+    earthDistanceMillionKm: '2.6–3.2 billion km',
+    gravityMs2: 8.7,
     meanTempC: -195,
-    tempExtremesC: 'Cloud-top temperature ~−216 °C',
-    moons: 28,
-    orbitalPeriodDays: 30589,
-    rotationPeriodHours: -17.2,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(19.17),
-    radiationNote: 'Magnetosphere is tilted 59° from the spin axis and tumbles — unpredictable charged-particle environment.',
+    tempRangeC: '≈ −195 °C at 1-bar level (coldest planetary atmosphere measured)',
+    solarIrradianceWm2: 3.7,
+    orbitalPeriod: '84 years',
+    dayLength: '≈ 17 h (retrograde; axis tilted 98°)',
+    moons: '28 (NASA, 2023)',
+    atmosphere: 'Hydrogen/helium/methane ice giant; extreme axial tilt gives 21-year seasons',
+    radiationNotes: 'Unusual off-axis magnetosphere; only visited once (Voyager 2, 1986)',
+    avgOneWayDelaySeconds: 10140,
+    realMissionContext: 'Voyager 2 is the only spacecraft to visit Uranus (1986). A dedicated flagship mission is a top science priority.',
   },
   'neptune': {
-    meanDistanceFromSunMkm: 4515.0,
-    distanceFromSunAu: 30.18,
-    distanceFromEarthMkm: { min: 4300, max: 4700 },
-    surfaceGravityMs2: 11.0,
+    key: 'neptune',
+    label: 'Neptune',
+    distanceFromSunAu: 30.07,
+    earthDistanceMillionKm: '4.3–4.7 billion km',
+    gravityMs2: 11.0,
     meanTempC: -200,
-    tempExtremesC: 'Cloud-top temperature ~−214 °C',
-    moons: 16,
-    orbitalPeriodDays: 59800,
-    rotationPeriodHours: 16.1,
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(30.18),
-    radiationNote: 'Only visited once (Voyager 2, 1989). Solar illumination is ~0.11% of Earth\'s.',
+    tempRangeC: '≈ −200 °C at 1-bar level',
+    solarIrradianceWm2: 1.5,
+    orbitalPeriod: '164.8 years',
+    dayLength: '≈ 16 h',
+    moons: '16 (NASA, 2023)',
+    atmosphere: 'Ice giant with the fastest winds measured in the solar system (≈ 2,000 km/h)',
+    radiationNotes: 'Deep-space radiation environment; Voyager 2 flew past in 1989',
+    avgOneWayDelaySeconds: 15600,
+    realMissionContext: 'Voyager 2’s 1989 flyby is our only close-up visit. Neptune receives ~0.1% of the sunlight Earth gets.',
   },
   'asteroid': {
-    // Belt reference values; individual asteroids vary widely.
-    meanDistanceFromSunMkm: 404, // ~2.7 AU, middle of the main belt (2.2–3.2 AU)
+    key: 'asteroid',
+    label: 'Asteroid',
     distanceFromSunAu: 2.7,
-    distanceFromEarthMkm: { min: 80, max: 500 },
-    surfaceGravityMs2: null, // e.g. Bennu ~0.000006 m/s², Ceres 0.27 — varies by orders of magnitude
-    meanTempC: -100,
-    tempExtremesC: '−73 °C (main-belt average); NEAs can span far wider',
-    moons: null,
-    orbitalPeriodDays: 1680, // ~4.6 years at 2.7 AU
-    rotationPeriodHours: null, // 2–30 h typical
-    solarIlluminationPercentOfEarth: solarIlluminationPercent(2.7),
-    radiationNote: 'No atmosphere or magnetosphere; full exposure to solar wind and cosmic rays.',
+    earthDistanceMillionKm: '150–500 million km (main belt typical)',
+    gravityMs2: 0.28,
+    meanTempC: -105,
+    tempRangeC: 'varies; ≈ −105 °C at main-belt distance (Ceres)',
+    solarIrradianceWm2: 187,
+    orbitalPeriod: '3–6 years (main belt)',
+    dayLength: 'Hours (fast rotators) to days',
+    moons: 'Some asteroids have small moons (e.g. Dactyl around Ida)',
+    atmosphere: 'None; microgravity with irregular gravity fields',
+    radiationNotes: 'No shielding; long exposure to cosmic rays and solar particles',
+    avgOneWayDelaySeconds: 1080,
+    realMissionContext: 'NASA’s OSIRIS-REx returned samples from asteroid Bennu in 2023; Dawn used ion propulsion to orbit Vesta and Ceres.',
   },
 };
 
-// ── Light-time (communication delay) ────────────────────────────────────────
+// ── Static dataset: real missions (educational comparisons) ──────────────────
 
-const SPEED_OF_LIGHT_KM_S = 299792.458; // exact, by SI definition
-
-export interface LightTimeResult {
-  seconds: number;
-  /** Round-trip seconds (command out + reply back). */
-  roundTripSeconds: number;
-  /** Human-readable one-way delay, e.g. "12 min 38 s". */
-  formatted: string;
-  /** True when the value is computed from verified distance data. */
-  computedFromVerifiedData: boolean;
-}
-
-export function computeLightTime(distanceKm: number): LightTimeResult {
-  const seconds = distanceKm / SPEED_OF_LIGHT_KM_S;
-  const roundTripSeconds = seconds * 2;
-  const formatted =
-    seconds < 1
-      ? `${(seconds * 1000).toFixed(0)} ms`
-      : seconds < 60
-        ? `${seconds.toFixed(1)} s`
-        : seconds < 5400
-          ? `${Math.floor(seconds / 60)} min ${Math.round(seconds % 60)} s`
-          : `${(seconds / 3600).toFixed(2)} h`;
-  return {
-    seconds,
-    roundTripSeconds,
-    formatted,
-    computedFromVerifiedData: true,
-  };
-}
-
-/** Representative Earth↔destination distance in km for the delay demo. */
-export function representativeEarthDistanceKm(destination: Destination): number {
-  const facts = DESTINATION_FACTS[destination];
-  if (!facts.distanceFromEarthMkm) return 400; // LEO representative value
-  // Use the mid-point of the documented range (geometric mean keeps order of magnitude honest).
-  const { min, max } = facts.distanceFromEarthMkm;
-  const midMkm = Math.sqrt(min * max);
-  return midMkm * 1e6;
-}
-
-export interface CommDelayInfo {
-  label: string;                 // e.g. "Mars (representative distance)"
-  representativeDistanceKm: number;
-  distanceNote: string;
-  lightTime: LightTimeResult;
-}
-
-export function getCommDelayInfo(destination: Destination): CommDelayInfo {
-  const facts = DESTINATION_FACTS[destination];
-  const representativeDistanceKm = representativeEarthDistanceKm(destination);
-  const range = facts.distanceFromEarthMkm;
-  const distanceNote = range
-    ? `Real distance varies ${range.min}–${range.max} million km as both planets orbit.`
-    : destination === 'moon'
-      ? 'Mean Earth–Moon distance 384,400 km (varies 356,500–406,700 km).'
-      : 'Low Earth orbit representative altitude ~400 km.';
-  return {
-    label: destination,
-    representativeDistanceKm,
-    distanceNote,
-    lightTime: computeLightTime(representativeDistanceKm),
-  };
-}
-
-// ── Solar-system scale (visualization + education) ──────────────────────────
-
-export interface PlanetScalePoint {
-  destination: Destination;
-  label: string;
-  au: number;
-  /** Diameter for rendering (log-scaled visual size — NOT to physical scale). */
-  visualSize: number;
-  color: string;
-}
-
-/** Visual orbit radii use a log scale so all planets fit on one diagram. */
-export const SOLAR_SYSTEM_SCALE: PlanetScalePoint[] = (
-  [
-    ['mercury', 'Mercury', '#78716c'],
-    ['venus', 'Venus', '#d97706'],
-    ['earth-orbit', 'Earth', '#3b82f6'],
-    ['mars', 'Mars', '#ef4444'],
-    ['asteroid', 'Asteroid belt', '#a78bfa'],
-    ['jupiter', 'Jupiter', '#f97316'],
-    ['saturn', 'Saturn', '#eab308'],
-    ['uranus', 'Uranus', '#06b6d4'],
-    ['neptune', 'Neptune', '#6366f1'],
-  ] as [Destination, string, string][]
-).map(([destination, label, color]) => ({
-  destination,
-  label,
-  color,
-  au: DESTINATION_FACTS[destination].distanceFromSunAu,
-  visualSize: destination === 'asteroid' ? 2.5 : Math.max(3, Math.min(11, 3 + Math.log10(DESTINATION_FACTS[destination].distanceFromSunAu * 2) * 2.2)),
-}));
-
-// ── Asteroid reference data ─────────────────────────────────────────────────
-
-export interface AsteroidFact {
-  id: string;
-  name: string;
-  class: string;
-  meanDiameterKm: number;
-  au: number;
-  note: string;
-  visitedBy: string;
-}
-
-export const ASTEROID_REFERENCE: AsteroidFact[] = [
-  {
-    id: 'ceres',
-    name: '1 Ceres',
-    class: 'Main-belt dwarf planet',
-    meanDiameterKm: 940,
-    au: 2.77,
-    note: 'Largest object in the main belt; likely water-rich.',
-    visitedBy: 'Dawn (orbited 2015–2018, ion propulsion + solar power)',
-  },
-  {
-    id: 'bennu',
-    name: '101955 Bennu',
-    class: 'Near-Earth asteroid (b-type)',
-    meanDiameterKm: 0.49,
-    au: 1.13,
-    note: 'Sample returned to Earth by OSIRIS-REx in September 2023.',
-    visitedBy: 'OSIRIS-REx (sample return, 2016–2023)',
-  },
-  {
-    id: 'eros',
-    name: '433 Eros',
-    class: 'Near-Earth asteroid (S-type)',
-    meanDiameterKm: 16.8,
-    au: 1.46,
-    note: 'First asteroid orbited by a spacecraft, and first asteroid landed on.',
-    visitedBy: 'NEAR Shoemaker (2000–2001)',
-  },
-  {
-    id: 'psyche',
-    name: '16 Psyche',
-    class: 'Main-belt metal-rich asteroid',
-    meanDiameterKm: 220,
-    au: 2.92,
-    note: 'Possible exposed planetary core material — NASA Psyche mission arrives 2029.',
-    visitedBy: 'Psyche (en route, ion propulsion + solar power)',
-  },
-];
-
-// ── Real mission reference data (educational comparisons) ───────────────────
-
-export interface ReferenceMission {
-  id: string;
+export interface RealMission {
   name: string;
   agency: string;
-  launchYear: number;
-  destinationLabel: string;
-  destinations: Destination[];
-  spacecraftKind: string;
-  power: string;
+  years: string;
+  target: string;
+  craftType: string;
+  power: 'Solar' | 'RPS / RTG' | 'Solar + battery' | 'Fuel cells';
   propulsion: string;
-  /** What this real mission teaches the player. */
-  lesson: string;
+  highlight: string;
 }
 
-export const REFERENCE_MISSIONS: ReferenceMission[] = [
+export const REAL_MISSIONS: RealMission[] = [
   {
-    id: 'voyager2',
-    name: 'Voyager 2',
-    agency: 'NASA',
-    launchYear: 1977,
-    destinationLabel: 'All four giant planets',
-    destinations: ['jupiter', 'saturn', 'uranus', 'neptune'],
-    spacecraftKind: 'Flyby probe',
-    power: 'Radioisotope (RTG)',
-    propulsion: 'Chemical + gravity assists',
-    lesson: 'Only spacecraft to visit Uranus and Neptune. Its RTG power still works — 47+ years after launch, far beyond any solar array.',
+    name: 'Voyager 1 & 2', agency: 'NASA', years: '1977–', target: 'Outer planets → interstellar space',
+    craftType: 'Flyby', power: 'RPS / RTG', propulsion: 'Chemical + gravity assists',
+    highlight: 'Used planet alignment for a “Grand Tour”; still returning data over 24 billion km away.',
   },
   {
-    id: 'cassini',
-    name: 'Cassini–Huygens',
-    agency: 'NASA / ESA / ASI',
-    launchYear: 1997,
-    destinationLabel: 'Saturn & Titan',
-    destinations: ['saturn'],
-    spacecraftKind: 'Orbiter + lander',
-    power: 'Radioisotope (RTG)',
-    propulsion: 'Chemical + gravity assists',
-    lesson: '13 years in Saturn orbit. Showed how an orbiter and a lander combine for surface science — and why deep-space power demands nuclear sources.',
+    name: 'Cassini–Huygens', agency: 'NASA/ESA/ASI', years: '1997–2017', target: 'Saturn & Titan',
+    craftType: 'Orbiter + lander', power: 'RPS / RTG', propulsion: 'Chemical',
+    highlight: '13 years at Saturn; Huygens landed on Titan. Solar power is not viable that far out.',
   },
   {
-    id: 'juno',
-    name: 'Juno',
-    agency: 'NASA',
-    launchYear: 2011,
-    destinationLabel: 'Jupiter',
-    destinations: ['jupiter'],
-    spacecraftKind: 'Orbiter',
-    power: 'Solar (largest arrays flown to Jupiter)',
-    propulsion: 'Chemical',
-    lesson: 'Proved solar power CAN reach Jupiter — but needed three 30-ft panels and a carefully designed orbit that keeps them in sunlight.',
+    name: 'Juno', agency: 'NASA', years: '2011–', target: 'Jupiter',
+    craftType: 'Orbiter', power: 'Solar', propulsion: 'Chemical',
+    highlight: 'First solar-powered mission to Jupiter — needs arrays the size of a basketball court to collect 4% of Earth-level sunlight.',
   },
   {
-    id: 'perseverance',
-    name: 'Perseverance',
-    agency: 'NASA',
-    launchYear: 2020,
-    destinationLabel: 'Mars (Jezero Crater)',
-    destinations: ['mars'],
-    spacecraftKind: 'Rover',
-    power: 'Radioisotope (MMRTG)',
-    propulsion: 'Chemical cruise stage',
-    lesson: 'Drives itself between commands because Mars delay makes joystick control impossible — the core reason for spacecraft autonomy.',
+    name: 'Perseverance', agency: 'NASA', years: '2020–', target: 'Mars (Jezero Crater)',
+    craftType: 'Rover', power: 'RPS / RTG', propulsion: 'Chemical (cruise + sky crane)',
+    highlight: 'Nuclear power lets it survive dust storms and long nights; first to make oxygen on another planet (MOXIE).',
   },
   {
-    id: 'osiris-rex',
-    name: 'OSIRIS-REx',
-    agency: 'NASA',
-    launchYear: 2016,
-    destinationLabel: 'Asteroid Bennu',
-    destinations: ['asteroid'],
-    spacecraftKind: 'Sample-return probe',
-    power: 'Solar',
-    propulsion: 'Chemical',
-    lesson: 'Tagged a 490-m asteroid and returned 121.6 g of samples — asteroid missions need precision, not raw thrust.',
+    name: 'New Horizons', agency: 'NASA', years: '2006–', target: 'Pluto & Kuiper Belt',
+    craftType: 'Flyby', power: 'RPS / RTG', propulsion: 'Chemical',
+    highlight: 'Fastest launch ever; a flyby architecture was the only affordable way to reach Pluto.',
   },
   {
-    id: 'dawn',
-    name: 'Dawn',
-    agency: 'NASA',
-    launchYear: 2007,
-    destinationLabel: 'Vesta & Ceres',
-    destinations: ['asteroid'],
-    spacecraftKind: 'Orbiter',
-    power: 'Solar',
-    propulsion: 'Ion',
-    lesson: 'First spacecraft to orbit two worlds beyond Earth. Its ion drive ran for years on sunlight alone.',
+    name: 'OSIRIS-REx', agency: 'NASA', years: '2016–2023', target: 'Asteroid Bennu',
+    craftType: 'Sample-return', power: 'Solar', propulsion: 'Chemical',
+    highlight: 'Touched an asteroid and delivered 121.6 g of pristine samples to Earth.',
   },
   {
-    id: 'new-horizons',
-    name: 'New Horizons',
-    agency: 'NASA',
-    launchYear: 2006,
-    destinationLabel: 'Pluto & Kuiper Belt',
-    destinations: ['neptune'],
-    spacecraftKind: 'Flyby probe',
-    power: 'Radioisotope (RTG)',
-    propulsion: 'Chemical + Jupiter gravity assist',
-    lesson: 'Fastest launch ever (16 km/s). Data downlink from Pluto took months because of the 4.5-hour signal delay and tiny data rates.',
+    name: 'Dawn', agency: 'NASA', years: '2007–2018', target: 'Vesta & Ceres',
+    craftType: 'Orbiter', power: 'Solar', propulsion: 'Ion (xenon)',
+    highlight: 'First spacecraft to orbit two extraterrestrial bodies — made possible by ion propulsion efficiency.',
   },
   {
-    id: 'europa-clipper',
-    name: 'Europa Clipper',
-    agency: 'NASA',
-    launchYear: 2024,
-    destinationLabel: 'Jupiter / Europa',
-    destinations: ['jupiter'],
-    spacecraftKind: 'Orbiter',
-    power: 'Solar (again — at Jupiter)',
-    propulsion: 'Chemical + gravity assists',
-    lesson: 'Carries vault-like shielding for Europa\'s radiation — a live example of designing instruments around environment risk.',
+    name: 'MESSENGER', agency: 'NASA', years: '2004–2015', target: 'Mercury',
+    craftType: 'Orbiter', power: 'Solar', propulsion: 'Chemical + gravity assists',
+    highlight: 'Needed six gravity assists and a ceramic sunshade to survive near the Sun.',
   },
   {
-    id: 'insight',
-    name: 'InSight',
-    agency: 'NASA',
-    launchYear: 2018,
-    destinationLabel: 'Mars surface',
-    destinations: ['mars'],
-    spacecraftKind: 'Lander',
-    power: 'Solar',
-    propulsion: 'Chemical',
-    lesson: 'Its seismometer listened for marsquakes for four years. Dust eventually cut solar power — power budgets decide mission lifetimes.',
+    name: 'InSight', agency: 'NASA', years: '2018–2022', target: 'Mars surface',
+    craftType: 'Lander', power: 'Solar + battery', propulsion: 'Chemical',
+    highlight: 'Its seismometer detected over 1,300 marsquakes — exactly what a seismometer instrument is for.',
   },
   {
-    id: 'marco',
-    name: 'MarCO (A & B)',
-    agency: 'NASA',
-    launchYear: 2018,
-    destinationLabel: 'Mars (relay flyby)',
-    destinations: ['mars'],
-    spacecraftKind: 'CubeSat',
-    power: 'Solar',
-    propulsion: 'Cold-gas chemical',
-    lesson: 'First CubeSats in deep space — tiny missions can help big ones, but only carry minimal instruments.',
+    name: 'MarCO A/B', agency: 'NASA', years: '2018', target: 'Mars flyby',
+    craftType: 'CubeSat', power: 'Solar', propulsion: 'Cold-gas + ion experiment',
+    highlight: 'First CubeSats to deep space; relayed InSight’s landing telemetry in real time.',
   },
   {
-    id: 'bepicolombo',
-    name: 'BepiColombo',
-    agency: 'ESA / JAXA',
-    launchYear: 2018,
-    destinationLabel: 'Mercury',
-    destinations: ['mercury'],
-    spacecraftKind: 'Orbiter (two orbiters)',
-    power: 'Solar',
-    propulsion: 'Ion + gravity assists',
-    lesson: 'Mercury is HARD to reach — falling toward the Sun costs more energy than falling away. Nine flybys before orbit insertion.',
+    name: 'Parker Solar Probe', agency: 'NASA', years: '2018–', target: 'Sun’s corona',
+    craftType: 'Flyby', power: 'Solar + battery', propulsion: 'Chemical + Venus gravity assists',
+    highlight: 'Fastest human-made object; its cooled solar panels work within 6.9 million km of the Sun.',
   },
   {
-    id: 'jwst',
-    name: 'James Webb Space Telescope',
-    agency: 'NASA / ESA / CSA',
-    launchYear: 2021,
-    destinationLabel: 'Sun–Earth L2 (1.5M km)',
-    destinations: ['earth-orbit'],
-    spacecraftKind: 'Space telescope',
-    power: 'Solar (at L2)',
-    propulsion: 'Chemical (station-keeping)',
-    lesson: 'Chose the L2 point for an unobstructed cold view — destination selection is itself a science trade-off.',
+    name: 'Europa Clipper', agency: 'NASA', years: '2024–', target: 'Jupiter’s moon Europa',
+    craftType: 'Orbiter', power: 'Solar', propulsion: 'Chemical + gravity assists',
+    highlight: 'Huge solar arrays and a metal “radiation vault” protect its ice-penetrating radar and other instruments.',
+  },
+  {
+    name: 'James Webb Space Telescope', agency: 'NASA/ESA/CSA', years: '2021–', target: 'Sun–Earth L2',
+    craftType: 'Space telescope', power: 'Solar + battery', propulsion: 'Chemical (station-keeping)',
+    highlight: 'Observes infrared from a stable point 1.5 million km away behind a tennis-court-sized sunshield.',
+  },
+  {
+    name: 'Hubble Space Telescope', agency: 'NASA/ESA', years: '1990–', target: 'Earth orbit',
+    craftType: 'Space telescope', power: 'Solar', propulsion: 'Chemical / reboosts',
+    highlight: 'Low Earth orbit gave astronauts the chance to repair and upgrade it five times.',
   },
 ];
 
-// ── Travel-time reference table (educational, from real mission records) ────
+// ── Data source registry (shown in About → Data Sources) ─────────────────────
 
-export interface TravelTimeReference {
-  destination: Destination;
-  /** Typical real-world cruise time. */
-  typicalCruise: string;
-  example: string;
-  note: string;
+export interface DataSource {
+  id: string;
+  organization: string;
+  dataset: string;
+  url: string;
+  usedFor: string;
 }
 
-export const TRAVEL_TIME_REFERENCE: Record<Destination, TravelTimeReference> = {
-  'earth-orbit': {
-    destination: 'earth-orbit',
-    typicalCruise: 'Minutes',
-    example: 'Launch to LEO takes ~8–10 minutes',
-    note: 'Getting to orbit at all costs most of a mission\'s energy budget.',
+export const DATA_SOURCES: DataSource[] = [
+  {
+    id: 'nssdc-factsheet',
+    organization: 'NASA (NSSDCA)',
+    dataset: 'Planetary Fact Sheet',
+    url: 'https://nssdc.gsfc.nasa.gov/planetary/factsheet/',
+    usedFor: 'Destination information — distances, gravity, temperatures, moons, orbital periods.',
   },
-  'moon': {
-    destination: 'moon',
-    typicalCruise: 'Days',
-    example: 'Apollo missions took ~3 days',
-    note: 'Short cruise, but every kilogram of landing gear must be carried.',
+  {
+    id: 'solar-system-exploration',
+    organization: 'NASA',
+    dataset: 'Solar System Exploration pages',
+    url: 'https://science.nasa.gov/solar-system/',
+    usedFor: 'Destination environments and mission context descriptions.',
   },
-  'mercury': {
-    destination: 'mercury',
-    typicalCruise: '~7 years',
-    example: 'BepiColombo launched 2018, arrives 2026',
-    note: 'Counter-intuitive: diving sunward needs many braking flybys.',
+  {
+    id: 'dsn',
+    organization: 'NASA / JPL',
+    dataset: 'Deep Space Network overview',
+    url: 'https://www.nasa.gov/general/deep-space-network/',
+    usedFor: 'Communication delay concepts and deep-space communication context.',
   },
-  'venus': {
-    destination: 'venus',
-    typicalCruise: 'Months',
-    example: 'Akatsuki took ~7 months (then needed a 5-year retry)',
-    note: 'Short transfer windows every ~19 months.',
+  {
+    id: 'mission-pages',
+    organization: 'NASA / JPL (and partners)',
+    dataset: 'Individual mission pages — Voyager, Cassini, Juno, Perseverance, OSIRIS-REx, Dawn, MESSENGER, MarCO, Parker Solar Probe, Europa Clipper, JWST, Hubble',
+    url: 'https://science.nasa.gov/missions/',
+    usedFor: 'Educational comparisons between your design and real mission architectures.',
   },
-  'mars': {
-    destination: 'mars',
-    typicalCruise: '6–9 months',
-    example: 'Perseverance: ~7 months (Jul 2020 → Feb 2021)',
-    note: 'Windows open every ~26 months when orbits align.',
+  {
+    id: 'nssd-chronology',
+    organization: 'NASA (NSSDCA)',
+    dataset: 'Master Catalog / mission chronology',
+    url: 'https://nssdc.gsfc.nasa.gov/nmc/',
+    usedFor: 'Mission years and highlights used in the Learn page examples.',
   },
-  'jupiter': {
-    destination: 'jupiter',
-    typicalCruise: '5–6 years',
-    example: 'Juno: ~5 years; Europa Clipper: ~5.5 years',
-    note: 'Gravity assists shave years off the trip.',
-  },
-  'saturn': {
-    destination: 'saturn',
-    typicalCruise: '~7 years',
-    example: 'Cassini: 1997 → 2004',
-    note: 'Long cruise favors long-lived, reliable power systems.',
-  },
-  'uranus': {
-    destination: 'uranus',
-    typicalCruise: '9+ years',
-    example: 'Voyager 2: 9.5 years (using a rare planetary alignment)',
-    note: 'Launch windows that good recur roughly every 175 years.',
-  },
-  'neptune': {
-    destination: 'neptune',
-    typicalCruise: '12+ years',
-    example: 'Voyager 2: 12 years (1989 flyby)',
-    note: 'Requires spacecraft designed to last decades.',
-  },
-  'asteroid': {
-    destination: 'asteroid',
-    typicalCruise: '1–4 years',
-    example: 'OSIRIS-REx: ~2 years to Bennu',
-    note: 'Depends entirely on which asteroid — targets range from months to years away.',
-  },
-};
+];
+
+export const DATA_NOTE =
+  'Values shown from these datasets are approximate averages compiled for education. ' +
+  'Distances between planets change constantly as both planets orbit, so ranges — not exact figures — are shown. ' +
+  'Communication delays in the simulation are one-way light-time estimates (distance ÷ speed of light), not exact real-time values.';
+
+export const DISCLAIMER =
+  'This is an independent educational project inspired by real space mission concepts. ' +
+  'It is not an official NASA website, application, or engineering tool.';
+
+// ── Default provider: fully offline static data ──────────────────────────────
+
+class StaticSpaceDataProvider implements SpaceDataProvider {
+  getDestinationFacts(key: string): DestinationFacts | null {
+    return DESTINATION_FACTS[key] ?? null;
+  }
+  listDestinationKeys(): string[] {
+    return Object.keys(DESTINATION_FACTS);
+  }
+  getRealMissions(): RealMission[] {
+    return REAL_MISSIONS;
+  }
+  getDataSources(): DataSource[] {
+    return DATA_SOURCES;
+  }
+}
+
+let provider: SpaceDataProvider = new StaticSpaceDataProvider();
+
+/** Swap in a custom (e.g. live-API-backed) provider without touching app code. */
+export function setSpaceDataProvider(p: SpaceDataProvider): void {
+  provider = p;
+}
+
+export function getSpaceDataProvider(): SpaceDataProvider {
+  return provider;
+}
+
+export function getDestinationFacts(key: string | null | undefined): DestinationFacts | null {
+  if (!key) return null;
+  return provider.getDestinationFacts(key);
+}
+
+/** Relative sunlight strength vs Earth (Earth = 1). Educational approximation. */
+export function relativeSunlight(key: string): number | null {
+  const f = DESTINATION_FACTS[key];
+  if (!f || !f.solarIrradianceWm2) return null;
+  return f.solarIrradianceWm2 / 1361;
+}

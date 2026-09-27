@@ -3,6 +3,8 @@
 import React from 'react';
 
 import { OBJECTIVES, type MissionObjective } from '@/lib/missionData';
+import { STAGE_EDUCATION } from '@/lib/missionEducation';
+import WhyItMatters from '@/components/ui/WhyItMatters';
 import type { useMissionStore } from '@/lib/missionStore';
 
 interface Props {
@@ -41,6 +43,8 @@ export default function Stage1Objective({ store }: Props) {
           <p className="text-sm text-foreground">{OBJECTIVES[mission.objective].scientificPurpose}</p>
         </div>
       )}
+
+      <WhyItMatters education={STAGE_EDUCATION.objective} compact />
     </div>
   );
 }

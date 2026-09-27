@@ -1,14 +1,14 @@
 'use client';
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useMissionStore } from '@/lib/missionStore';
 import { calculateMissionScores, MISSION_STAGES } from '@/lib/missionData';
-import { computeMissionDna, getAdvisorInsights } from '@/lib/missionRules';
+import { computeMissionDNA } from '@/lib/missionDNA';
 import ProgressBar from './ProgressBar';
 import MissionStatusPanel from './MissionStatusPanel';
-import AnalysisPanel from './AnalysisPanel';
+import DNAPanel from './DNAPanel';
 import Stage0MissionName from './Stage0MissionName';
 import Stage1Objective from './Stage1Objective';
 import Stage2Destination from './Stage2Destination';
@@ -18,27 +18,20 @@ import Stage5Propulsion from './Stage5Propulsion';
 import Stage6Power from './Stage6Power';
 import Stage7Communication from './Stage7Communication';
 import Stage8Review from './Stage8Review';
-import MissionDna from '@/components/ui/MissionDna';
-import MissionAdvisor from '@/components/ui/MissionAdvisor';
-import WhatIfLab from '@/components/ui/WhatIfLab';
-import { ChevronLeft, ChevronRight, Rocket, Dna, Sparkles, FlaskConical, BarChart3 } from 'lucide-react';
-
-type RightTab = 'analysis' | 'dna' | 'advisor' | 'lab';
+import { ChevronLeft, ChevronRight, Rocket, FlaskConical } from 'lucide-react';
 
 export default function MissionDesignerClient() {
   const router = useRouter();
   const store = useMissionStore();
   const { mission, completeStage, goToStage, resetMission, getProgressPercent } = store;
-  const [rightTab, setRightTab] = useState<RightTab>('dna');
 
   const scores = calculateMissionScores(mission);
+  const dna = computeMissionDNA(mission, scores);
   const progress = getProgressPercent();
-  const dna = useMemo(() => computeMissionDna(mission), [mission]);
-  const advisorInsights = useMemo(() => getAdvisorInsights(mission), [mission]);
 
   const canAdvance = useCallback((): boolean => {
     const stage = mission.currentStage;
-    if (stage === 0) return mission.missionName.trim().length > 0 || true; // name optional
+    if (stage === 0) return true; // name optional
     if (stage === 1) return mission.objective !== null;
     if (stage === 2) return mission.destination !== null;
     if (stage === 3) return mission.spacecraft !== null;
@@ -56,21 +49,9 @@ export default function MissionDesignerClient() {
       return;
     }
     if (mission.currentStage === 8) {
-      // Launch — navigate to simulation. The draft is NOT cleared here (that
-      // would repaint this page at stage 0 mid-navigation); the simulation
-      // screen clears the stored draft once it mounts. The mission itself is
-      // fully encoded in the URL params, so nothing is lost.
-      const params = new URLSearchParams({
-        missionName: mission.missionName || 'Mission Alpha',
-        objective: mission.objective ?? '',
-        destination: mission.destination ?? '',
-        spacecraft: mission.spacecraft ?? '',
-        instruments: mission.instruments.join(','),
-        propulsion: mission.propulsion ?? '',
-        power: mission.power ?? '',
-        communication: mission.communication ?? '',
-      });
-      router.push(`/mission-simulation-screen?${params.toString()}`);
+      // Launch — the simulation reads the same in-memory session mission, so
+      // the exact configuration flows through without any URL params.
+      router.push('/mission-simulation-screen');
       return;
     }
     completeStage(mission.currentStage);
@@ -96,7 +77,7 @@ export default function MissionDesignerClient() {
     5: <Stage5Propulsion store={store} />,
     6: <Stage6Power store={store} />,
     7: <Stage7Communication store={store} />,
-    8: <Stage8Review store={store} scores={scores} />,
+    8: <Stage8Review store={store} scores={scores} dna={dna} />,
   };
 
   return (
@@ -108,9 +89,19 @@ export default function MissionDesignerClient() {
             <h1 className="text-2xl font-bold text-foreground">Mission Designer</h1>
             <p className="text-sm text-muted-foreground">Design your space mission step by step</p>
           </div>
-          <button onClick={handleReset} className="btn-secondary text-xs px-3 py-2">
-            Start Over
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => router.push('/what-if-lab')}
+              className="btn-secondary text-xs px-3 py-2"
+              title="Compare configuration alternatives"
+            >
+              <FlaskConical size={14} />
+              What-If Lab
+            </button>
+            <button onClick={handleReset} className="btn-secondary text-xs px-3 py-2">
+              Start Over
+            </button>
+          </div>
         </div>
         <ProgressBar
           stages={MISSION_STAGES}
@@ -172,41 +163,9 @@ export default function MissionDesignerClient() {
           </div>
         </div>
 
-        {/* Right: Analysis tabs — DNA / Advisor / What-If / Scores */}
+        {/* Right: Mission DNA + Advisor */}
         <div className="lg:block">
-          <div className="sticky top-24 space-y-3">
-            <div className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-card border border-border">
-              {([
-                { key: 'dna' as const, label: 'DNA', icon: Dna },
-                { key: 'advisor' as const, label: 'Advisor', icon: Sparkles },
-                { key: 'lab' as const, label: 'Lab', icon: FlaskConical },
-                { key: 'analysis' as const, label: 'Scores', icon: BarChart3 },
-              ]).map(tab => {
-                const Icon = tab.icon;
-                return (
-                  <button
-                    key={`tab-${tab.key}`}
-                    type="button"
-                    onClick={() => setRightTab(tab.key)}
-                    className={`flex flex-col items-center gap-0.5 py-2 rounded-md text-[10px] font-medium uppercase tracking-wide transition-colors ${
-                      rightTab === tab.key
-                        ? 'bg-primary/15 text-primary'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                    aria-pressed={rightTab === tab.key}
-                  >
-                    <Icon size={13} />
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {rightTab === 'dna' && <MissionDna dna={dna} />}
-            {rightTab === 'advisor' && <MissionAdvisor insights={advisorInsights} />}
-            {rightTab === 'lab' && <WhatIfLab mission={mission} />}
-            {rightTab === 'analysis' && <AnalysisPanel scores={scores} mission={mission} />}
-          </div>
+          <DNAPanel dna={dna} mission={mission} />
         </div>
       </div>
     </div>

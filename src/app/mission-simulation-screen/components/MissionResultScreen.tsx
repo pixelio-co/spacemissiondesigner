@@ -1,457 +1,308 @@
 'use client';
 
 /**
- * MISSION RESULT SCREEN
- * The end-of-mission debrief: full report, Science Return summary,
- * Failure Investigator (for trouble), lessons, and Replay.
+ * MissionResultScreen — the final mission report.
+ *
+ * Sections: MISSION OVERVIEW · MISSION CONFIGURATION · SCIENCE RETURN ·
+ * MISSION PERFORMANCE · MISSION OUTCOME · FAILURE INVESTIGATOR (when the
+ * mission struggled) · MISSION LESSONS · What-If/Replay/Next actions.
  */
 
-import React, { useState, useMemo } from 'react';
+import React from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import type { SimulationRecord, AutonomyChoice } from '@/lib/simulationEngine';
-import { runMission } from '@/lib/simulationEngine';
-import { getMissionRecord } from '@/lib/missionHistory';
+import type { MissionState, MissionResultData } from '@/lib/missionData';
+import {
+  DESTINATIONS, SPACECRAFT_TYPES, OBJECTIVES,
+  PROPULSION_SYSTEMS, POWER_SYSTEMS, COMMUNICATION_SYSTEMS, INSTRUMENTS,
+} from '@/lib/missionData';
+import type { ScienceStats, EventCategory, InvestigationNode } from '@/lib/simulationEngine';
+import { getCommDelay } from '@/lib/simulationEngine';
+import { getDestinationFacts } from '@/lib/spaceData';
+import { computeMissionDNA } from '@/lib/missionDNA';
+import DNABars from '@/components/ui/DNABars';
 import {
   CheckCircle, XCircle, AlertTriangle, Star, RotateCcw, BookOpen, Rocket,
-  ChevronDown, ChevronUp, Search, FlaskConical, Repeat, GitCompare,
+  Search, Lightbulb, FlaskConical, ArrowRight,
 } from 'lucide-react';
-import ArchitectureDiagram from '@/components/ui/ArchitectureDiagram';
-import MissionDna from '@/components/ui/MissionDna';
-import { computeMissionDna } from '@/lib/missionRules';
 
 interface Props {
-  record: SimulationRecord;
-  replayMode: boolean;
-  replayChangedLabel: string | null;
-  savedRecordId: string | null;
-  originalRecordId: string | null;
+  result: MissionResultData;
+  mission: MissionState;
+  science: ScienceStats | null;
+  investigation: InvestigationNode | null;
+  events: { category: EventCategory; title: string }[];
+  onRestart: () => void;
 }
 
-const resultConfig = {
+const resultConfig: Record<MissionResultData['type'], {
+  icon: React.ElementType; iconColor: string; border: string; bg: string; glow: string; badge: string;
+}> = {
   success: { icon: CheckCircle, iconColor: 'text-success', border: 'border-success/40', bg: 'bg-success/5', glow: 'result-success-glow', badge: 'badge-success' },
   'success-challenges': { icon: AlertTriangle, iconColor: 'text-warning', border: 'border-warning/40', bg: 'bg-warning/5', glow: 'result-warning-glow', badge: 'badge-warning' },
   partial: { icon: AlertTriangle, iconColor: 'text-warning', border: 'border-warning/40', bg: 'bg-warning/5', glow: 'result-warning-glow', badge: 'badge-warning' },
   failure: { icon: XCircle, iconColor: 'text-danger', border: 'border-danger/40', bg: 'bg-danger/5', glow: 'result-danger-glow', badge: 'badge-danger' },
   breakthrough: { icon: Star, iconColor: 'text-accent', border: 'border-accent/40', bg: 'bg-accent/5', glow: 'result-success-glow', badge: 'badge-info' },
-} as const;
-
-const OUTCOME_LABEL: Record<SimulationRecord['outcomes']['type'], string> = {
-  success: 'Successful',
-  'success-challenges': 'Successful with Challenges',
-  partial: 'Partially Successful',
-  failure: 'Ended Early',
-  breakthrough: 'Extraordinary Scientific Result',
 };
 
-/** One major decision the replay can change. */
-interface ReplayOption {
-  key: string;
-  label: string;
-  detail: string;
-  /** The alternative autonomy behavior (autonomy replays only). */
-  autonomy?: AutonomyChoice;
-  /** The alternative option index (decision replays only). */
-  choiceIndex?: number;
-  /** The decision event whose answer changes. */
-  decisionEventId?: string;
-  query: Record<string, string>;
-}
-
-function buildReplayOptions(record: SimulationRecord): ReplayOption[] {
-  const opts: ReplayOption[] = [];
-  const autonomyDecision = record.decisions.find(d => d.kind === 'autonomy');
-
-  if (autonomyDecision) {
-    const alternatives: { choice: AutonomyChoice; label: string; detail: string }[] = [
-      { choice: 'continue-science', label: 'Continue planned science', detail: 'Science continues autonomously; more observations, higher power draw.' },
-      { choice: 'safe-mode', label: 'Safe mode', detail: 'Protects spacecraft resources; science pauses.' },
-      { choice: 'wait', label: 'Wait for communication', detail: 'Conservative hold; may miss observation windows.' },
-    ];
-    // Current choice: infer from the recorded effects.
-    const currentIsContinue = autonomyDecision.optionLabel.toLowerCase().includes('continue');
-    const currentIsSafe = autonomyDecision.optionLabel.toLowerCase().includes('safe');
-    alternatives.forEach(alt => {
-      const isCurrent =
-        (currentIsContinue && alt.choice === 'continue-science') ||
-        (currentIsSafe && alt.choice === 'safe-mode') ||
-        (!currentIsContinue && !currentIsSafe && alt.choice === 'wait');
-      if (!isCurrent) {
-        opts.push({
-          key: `replay-autonomy-${alt.choice}`,
-          label: `During communication interruption → ${alt.label}`,
-          detail: alt.detail,
-          autonomy: alt.choice,
-          query: { replayLabel: `Autonomy: ${alt.label}` },
-        });
-      }
-    });
-  }
-
-  // Decision replays: re-run each player decision with a DIFFERENT option.
-  // Every other recorded decision is held constant via replayChoices, so the
-  // changed decision is the only variable between original and replay.
-  const playerDecisions = record.decisions.filter(d => d.kind === 'player');
-  playerDecisions.forEach(d => {
-    const ev = record.events.find(e => e.id === d.eventId);
-    if (!ev?.scenario) return;
-    const altIndex = d.optionIndex === 1 ? 0 : 1; // pick a different response
-    opts.push({
-      key: `replay-decision-${d.eventId}`,
-      label: `${d.eventTitle} → different response`,
-      detail: `Re-answer this event differently (you chose “${d.optionLabel}”). Everything else stays the same.`,
-      choiceIndex: altIndex,
-      decisionEventId: d.eventId,
-      query: { replayLabel: `${d.eventTitle} — alternative response` },
-    });
-  });
-
-  return opts.slice(0, 3);
-}
-
-export default function MissionResultScreen({ record, replayMode, replayChangedLabel, savedRecordId, originalRecordId }: Props) {
-  const router = useRouter();
-  const [showFullReport, setShowFullReport] = useState(false);
-  const [replayOpen, setReplayOpen] = useState(replayMode);
-  const config = resultConfig[record.outcomes.type];
+export default function MissionResultScreen({
+  result, mission, science, investigation, events, onRestart,
+}: Props) {
+  const config = resultConfig[result.type];
   const Icon = config.icon;
-  const mission = record.mission;
+  const destInfo = mission.destination ? DESTINATIONS[mission.destination] : null;
+  const facts = mission.destination ? getDestinationFacts(mission.destination) : null;
+  const scInfo = mission.spacecraft ? SPACECRAFT_TYPES[mission.spacecraft] : null;
+  const objInfo = mission.objective ? OBJECTIVES[mission.objective] : null;
+  const delay = getCommDelay(mission.destination);
+  const dna = computeMissionDNA(mission);
 
-  const dna = useMemo(() => computeMissionDna(mission), [mission]);
-
-  // For replay mode: find the original record to compare against.
-  const originalRecord = useMemo(() => {
-    if (!replayMode || !originalRecordId) return null;
-    return getMissionRecord(originalRecordId);
-  }, [replayMode, originalRecordId]);
-
-  const replayOptions = useMemo(() => buildReplayOptions(record), [record]);
-
-  // The original run's autonomy behavior — held constant in decision replays so
-  // the changed decision is the ONLY variable.
-  const originalAutonomy: AutonomyChoice | null = useMemo(() => {
-    const d = record.decisions.find(x => x.kind === 'autonomy');
-    if (!d) return null;
-    const l = d.optionLabel.toLowerCase();
-    if (l.includes('safe')) return 'safe-mode';
-    if (l.includes('wait')) return 'wait';
-    return 'continue-science';
-  }, [record]);
-
-  const startReplay = (opt: ReplayOption) => {
-    // Re-script EVERY recorded decision so only the chosen variable changes.
-    // Autonomy replays hold all player answers and the same autonomy;
-    // decision replays hold all answers + autonomy except one event.
-    const heldDecisions: Record<string, number> = {};
-    record.decisions.forEach(d => {
-      if (d.kind === 'player') heldDecisions[d.eventId] = d.optionIndex;
-    });
-    if (opt.decisionEventId) {
-      heldDecisions[opt.decisionEventId] = opt.choiceIndex ?? 1;
-    }
-
-    const params = new URLSearchParams({
-      missionName: mission.missionName || 'Mission Alpha',
-      objective: mission.objective ?? '',
-      destination: mission.destination ?? '',
-      spacecraft: mission.spacecraft ?? '',
-      instruments: mission.instruments.join(','),
-      propulsion: mission.propulsion ?? '',
-      power: mission.power ?? '',
-      communication: mission.communication ?? '',
-      replay: savedRecordId ?? '1',
-      originalRecord: savedRecordId ?? '',
-      replayChoices: JSON.stringify(heldDecisions),
-      // Autonomy replays pass the NEW choice; decision replays pin the ORIGINAL
-      // autonomy so it does not silently reset to the default.
-      ...((opt.autonomy ?? originalAutonomy) ? { autonomy: opt.autonomy ?? originalAutonomy! } : {}),
-      ...(opt.query.replayLabel ? { replayLabel: opt.query.replayLabel } : {}),
-    });
-    router.push(`/mission-simulation-screen?${params.toString()}`);
-  };
-
-  const sci = record.scienceReturn;
+  const scienceCards = science ? [
+    { label: 'Observations completed', value: String(science.observationsCompleted), color: 'text-success' },
+    { label: 'Instruments operated', value: `${science.instrumentsOperated}/${mission.instruments.length}`, color: 'text-info' },
+    { label: 'Major findings', value: String(science.majorFindings), color: 'text-accent' },
+    { label: 'Data returned', value: science.dataReturned, color: 'text-primary' },
+    { label: 'Objectives completed', value: `${science.objectivesCompletedPercent}%`, color: 'text-success' },
+  ] : [];
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-8">
-      {/* Result header */}
+      {/* ── Result header ── */}
       <div className={`space-card ${config.border} border-2 ${config.bg} ${config.glow} p-8 mb-6 text-center`}>
         <div className="flex justify-center mb-4">
           <Icon size={56} className={config.iconColor} />
         </div>
         <div className={`badge ${config.badge} mb-3 inline-flex mx-auto text-sm px-4 py-1`}>
-          {OUTCOME_LABEL[record.outcomes.type]}
+          MISSION OUTCOME
         </div>
         <h1 className="text-3xl sm:text-4xl font-bold text-foreground mb-2 font-mono tracking-wide">
-          {record.outcomes.title}
+          {result.title}
         </h1>
-        <p className="text-muted-foreground max-w-2xl mx-auto">{record.outcomes.subtitle}</p>
-        <p className="text-xs text-muted-foreground/80 max-w-2xl mx-auto mt-2 italic">{record.outcomes.explanation}</p>
-
-        <div className="flex items-center justify-center gap-8 mt-6 flex-wrap">
-          <div className="text-center">
-            <div className="text-4xl font-bold font-mono text-info">{sci.observationsCompleted}</div>
-            <div className="text-xs text-muted-foreground uppercase tracking-wider">Observations</div>
-          </div>
-          <div className="text-center">
-            <div className="text-4xl font-bold font-mono text-accent">{sci.majorFindings}</div>
-            <div className="text-xs text-muted-foreground uppercase tracking-wider">Major Findings</div>
-          </div>
-          <div className="text-center">
-            <div className="text-4xl font-bold font-mono text-success">{sci.objectivesCompletedPercent}%</div>
-            <div className="text-xs text-muted-foreground uppercase tracking-wider">Objectives Completed</div>
-          </div>
-        </div>
+        <p className="text-muted-foreground max-w-2xl mx-auto">{result.subtitle}</p>
       </div>
 
-      {/* Replay banner when this IS a replay */}
-      {replayMode && replayChangedLabel && (
-        <div className="space-card p-4 mb-6 border-accent/40 border-2 bg-accent/5">
-          <div className="flex items-center gap-2 mb-2">
-            <Repeat size={16} className="text-accent" />
-            <h2 className="text-sm font-bold text-accent uppercase tracking-wider">Replay Result</h2>
-          </div>
-          <p className="text-sm text-foreground">
-            You changed one decision: <strong>{replayChangedLabel}</strong>.
-            {originalRecord && (
-              <> Original outcome: <strong>{originalRecord.record.outcomes.title}</strong> →
-              This replay: <strong>{record.outcomes.title}</strong>.</>
-            )}
-          </p>
-          {originalRecord && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
-              {[
-                { label: 'Observations', orig: originalRecord.record.observationsCompleted, replay: record.observationsCompleted },
-                { label: 'Data returned (GB)', orig: originalRecord.record.dataReturnedGb, replay: record.dataReturnedGb },
-                { label: 'Objectives completed (%)', orig: originalRecord.record.scienceReturn.objectivesCompletedPercent, replay: record.scienceReturn.objectivesCompletedPercent },
-              ].map(cmp => {
-                const diff = cmp.replay - cmp.orig;
-                return (
-                  <div key={`cmp-${cmp.label}`} className="p-3 rounded-lg bg-muted/30 border border-border">
-                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">{cmp.label}</div>
-                    <div className="text-xs font-mono flex items-center gap-2">
-                      <span className="text-muted-foreground">{cmp.orig}</span>
-                      <GitCompare size={10} className="text-muted-foreground/60" />
-                      <span className="text-foreground font-bold">{cmp.replay}</span>
-                      <span className={diff > 0 ? 'text-success' : diff < 0 ? 'text-danger' : 'text-muted-foreground'}>
-                        ({diff > 0 ? '+' : ''}{diff})
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* SCIENCE RETURN */}
-      <div className="space-card p-6 mb-6 border-info/30 border">
-        <div className="flex items-center gap-2 mb-4">
-          <FlaskConical size={18} className="text-info" />
-          <h2 className="text-base font-bold text-foreground">Science Return</h2>
-          <span className="badge badge-neutral text-[9px]">Based on what actually happened</span>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-          {[
-            { label: 'Observations completed', value: sci.observationsCompleted, color: 'text-info' },
-            { label: 'Instruments operated', value: `${sci.instrumentsOperated}/${mission.instruments.length}`, color: 'text-success' },
-            { label: 'Major findings', value: sci.majorFindings, color: 'text-accent' },
-            { label: 'Data returned', value: `${sci.dataReturnedGb} GB`, color: 'text-primary' },
-            { label: 'Objectives completed', value: `${sci.objectivesCompletedPercent}%`, color: 'text-success' },
-          ].map(item => (
-            <div key={`sci-${item.label}`} className="p-3 rounded-lg bg-muted/30 border border-border text-center">
-              <div className={`text-2xl font-bold font-mono ${item.color}`}>{item.value}</div>
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">{item.label}</div>
-            </div>
-          ))}
-        </div>
-        <div className="space-y-1.5">
-          {Object.entries(sci.explanations).map(([key, text]) => (
-            <div key={`sci-exp-${key}`} className="text-xs text-muted-foreground leading-relaxed">
-              <span className="text-info font-semibold">Why: </span>{text}
-            </div>
-          ))}
-        </div>
-        {record.discoveries.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-border">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-              Observation log — each enabled by your instruments
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-              {record.discoveries.map(d => (
-                <div key={d.id} className="text-xs p-2 rounded bg-muted/20 border border-border flex items-start gap-2">
-                  <span className={d.significance === 'major' ? 'text-accent' : 'text-success'}>{d.significance === 'major' ? '★' : '·'}</span>
-                  <div>
-                    <span className="text-foreground font-medium">{d.label}</span>
-                    <span className="text-muted-foreground"> — {d.instrumentLabel} · {d.time}</span>
-                    <div className="text-[10px] text-muted-foreground/80 italic">{d.example}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* MISSION FAILURE INVESTIGATOR */}
-      {record.failureInvestigation && (
-        <div className="space-card p-6 mb-6 border-warning/40 border-2">
+      {/* ── Science Return ── */}
+      {science && (
+        <div className="space-card p-6 mb-6 border-success/25">
           <div className="flex items-center gap-2 mb-4">
-            <Search size={18} className="text-warning" />
-            <h2 className="text-base font-bold text-foreground">Mission Failure Investigator</h2>
-            <span className="badge badge-neutral text-[9px]">Educational explanation — not blame</span>
+            <FlaskConical size={16} className="text-success" />
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              Science Return
+            </h2>
+            <span className="text-[10px] text-muted-foreground ml-auto">
+              Based on what actually happened during your simulation
+            </span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-3">
-              <div className="p-3 rounded-lg bg-warning/5 border border-warning/20">
-                <div className="text-xs font-semibold text-warning uppercase tracking-wider mb-1">What happened?</div>
-                <p className="text-xs text-foreground leading-relaxed">{record.failureInvestigation.whatHappened}</p>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            {scienceCards.map(card => (
+              <div key={`sci-${card.label}`} className="p-3 rounded-lg bg-muted/40 border border-border text-center">
+                <div className={`text-2xl font-bold font-mono ${card.color}`}>{card.value}</div>
+                <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">{card.label}</div>
               </div>
-              <div className="p-3 rounded-lg bg-warning/5 border border-warning/20">
-                <div className="text-xs font-semibold text-warning uppercase tracking-wider mb-1">Why did it happen?</div>
-                <p className="text-xs text-foreground leading-relaxed">{record.failureInvestigation.whyItHappened}</p>
-              </div>
-              {record.failureInvestigation.systemsInvolved.length > 0 && (
-                <div className="p-3 rounded-lg bg-muted/30 border border-border">
-                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1.5">Systems involved</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {record.failureInvestigation.systemsInvolved.map(s => (
-                      <span key={`sys-${s}`} className="badge badge-neutral text-[9px]">{s}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="space-y-3">
-              <div className="p-3 rounded-lg bg-info/5 border border-info/20">
-                <div className="text-xs font-semibold text-info uppercase tracking-wider mb-1.5">What could have been done differently?</div>
-                <div className="space-y-2">
-                  {record.failureInvestigation.alternatives.map((alt, i) => (
-                    <div key={`alt-${i}`}>
-                      <div className="text-xs text-foreground font-medium">· {alt.action}</div>
-                      <div className="text-[11px] text-muted-foreground pl-3">{alt.likelyEffect}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-accent/5 border border-accent/20">
-                <div className="text-xs font-semibold text-accent uppercase tracking-wider mb-1">Educational lesson</div>
-                <p className="text-xs text-foreground leading-relaxed">{record.failureInvestigation.lesson}</p>
-              </div>
-            </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* REPLAY MISSION */}
-      {!replayMode && replayOptions.length > 0 && (
-        <div className="space-card p-6 mb-6">
-          <button
-            onClick={() => setReplayOpen(o => !o)}
-            className="flex items-center justify-between w-full text-left"
-            aria-expanded={replayOpen}
-          >
-            <div className="flex items-center gap-2">
-              <Repeat size={18} className="text-accent" />
-              <div>
-                <h2 className="text-base font-bold text-foreground">Replay Mission</h2>
-                <p className="text-xs text-muted-foreground">Change one major decision and see how the story changes.</p>
+      {/* ── Mission Overview + Configuration ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div className="space-card p-6">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Mission Overview</h2>
+          <div className="space-y-2.5">
+            {[
+              { label: 'Mission Name', value: mission.missionName || 'Mission Alpha' },
+              { label: 'Objective', value: objInfo ? `${objInfo.icon} ${objInfo.label}` : '—' },
+              { label: 'Destination', value: destInfo ? `${destInfo.icon} ${destInfo.label}` : '—' },
+              { label: 'Spacecraft', value: scInfo?.label ?? '—' },
+            ].map(item => (
+              <div key={`ov-${item.label}`} className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">{item.label}</span>
+                <span className="font-medium text-foreground text-right">{item.value}</span>
               </div>
-            </div>
-            {replayOpen ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
-          </button>
-
-          {replayOpen && (
-            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 animate-fadeIn">
-              {replayOptions.map(opt => (
-                <button
-                  key={opt.key}
-                  type="button"
-                  onClick={() => startReplay(opt)}
-                  className="option-card p-4 text-left"
-                >
-                  <div className="text-sm font-semibold text-foreground mb-1">{opt.label}</div>
-                  <div className="text-xs text-muted-foreground leading-relaxed">{opt.detail}</div>
-                  <div className="text-[10px] text-accent mt-2 font-mono uppercase tracking-wider">Run this replay →</div>
-                </button>
-              ))}
-              <div className="sm:col-span-2 text-[10px] text-muted-foreground italic">
-                Replays change exactly one decision — everything else stays the same, so differences
-                in the outcome show that decision's true effect.
+            ))}
+            {facts && (
+              <div className="pt-2 mt-2 border-t border-border text-[10px] text-muted-foreground leading-relaxed">
+                <strong>Destination conditions (NASA planetary data):</strong> {facts.tempRangeC ?? ''} ·
+                gravity {facts.gravityMs2} m/s² · one-way light time ≈ {delay.oneWayLabel}.
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      )}
 
-      {/* MISSION PERFORMANCE summary */}
+        <div className="space-card p-6">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Mission Configuration</h2>
+          <div className="space-y-2.5">
+            {[
+              { label: 'Instruments', value: mission.instruments.map(i => INSTRUMENTS[i].label).join(', ') || '—' },
+              { label: 'Propulsion', value: mission.propulsion ? PROPULSION_SYSTEMS[mission.propulsion].label : '—' },
+              { label: 'Power', value: mission.power ? POWER_SYSTEMS[mission.power].label : '—' },
+              { label: 'Communication', value: mission.communication ? COMMUNICATION_SYSTEMS[mission.communication].label : '—' },
+            ].map(item => (
+              <div key={`cfg-${item.label}`} className="text-sm">
+                <span className="text-muted-foreground">{item.label}: </span>
+                <span className="font-medium text-foreground">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Mission Performance ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <div className="space-card p-6">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Mission Performance</h2>
           <div className="space-y-2">
-            {[
-              { label: 'Final power reserves', value: `${Math.round(record.finalSystems.power)}%` },
-              { label: 'Communication health', value: `${Math.round(record.finalSystems.communication)}%` },
-              { label: 'Propulsion health', value: `${Math.round(record.finalSystems.propulsion)}%` },
-              { label: 'Instrument health', value: `${Math.round(record.finalSystems.instruments)}%` },
-              { label: 'Mission progress reached', value: `${record.endProgress}%` },
-            ].map(item => (
-              <div key={`perf-${item.label}`} className="flex items-center justify-between text-xs py-1.5 border-b border-border/50 last:border-0">
-                <span className="text-muted-foreground">{item.label}</span>
-                <span className="font-mono font-bold text-foreground">{item.value}</span>
+            {result.objectivesCompleted.map((obj, i) => (
+              <div key={`perf-ok-${i}`} className="flex items-start gap-2">
+                <CheckCircle size={13} className="text-success mt-0.5 flex-shrink-0" />
+                <span className="text-sm text-foreground">{obj}</span>
               </div>
             ))}
-          </div>
-          {record.decisions.length > 0 && (
-            <div className="mt-4">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Decisions made</div>
-              <div className="space-y-1.5">
-                {record.decisions.map(d => (
-                  <div key={`dec-${d.eventId}`} className="text-xs p-2 rounded bg-muted/20 border border-border">
-                    <span className="text-foreground font-medium">{d.eventTitle}</span>
-                    <span className="text-muted-foreground"> → {d.optionLabel}</span>
-                    <div className="text-[10px] text-muted-foreground/80 italic mt-0.5">{d.consequence}</div>
-                  </div>
-                ))}
+            {result.objectivesMissed.map((obj, i) => (
+              <div key={`perf-missed-${i}`} className="flex items-start gap-2">
+                <XCircle size={13} className="text-danger mt-0.5 flex-shrink-0" />
+                <span className="text-sm text-muted-foreground">{obj}</span>
               </div>
+            ))}
+            {result.objectivesCompleted.length === 0 && result.objectivesMissed.length === 0 && (
+              <p className="text-sm text-muted-foreground">No performance records.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="space-card p-6">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Major Events</h2>
+          {events.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No significant anomalies — your configuration handled the mission environment smoothly.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {events.map((ev, i) => (
+                <div key={`ev-${i}`} className="flex items-start gap-2">
+                  <AlertTriangle size={13} className="text-warning mt-0.5 flex-shrink-0" />
+                  <div>
+                    <span className="text-sm text-foreground">{ev.title}</span>
+                    <span className="text-xs text-muted-foreground block capitalize">
+                      {ev.category} challenge
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {result.playerDecisionSummary !== 'No decision required' && (
+            <div className="mt-4 pt-3 border-t border-border">
+              <div className="text-xs font-semibold text-accent uppercase tracking-wider mb-1">Your Decisions</div>
+              <p className="text-sm text-foreground">{result.playerDecisionSummary}</p>
             </div>
           )}
         </div>
-
-        {/* Mission DNA at completion */}
-        <MissionDna dna={dna} compact />
       </div>
 
-      {/* Lessons learned */}
-      <div className="space-card p-6 mb-6 border-info/30 border">
+      {/* ── Failure Investigator ── */}
+      {investigation && (
+        <div className="space-card p-6 mb-6 border-danger/30">
+          <div className="flex items-center gap-2 mb-1">
+            <Search size={16} className="text-danger" />
+            <h2 className="text-base font-bold text-foreground">Mission Failure Investigator</h2>
+          </div>
+          <p className="text-xs text-muted-foreground mb-4">
+            An educational explanation of what happened — not a blame assignment.
+            Real failures are usually systemic, not personal.
+          </p>
+
+          <div className="space-y-3">
+            <div className="p-3 rounded-lg bg-danger/5 border border-danger/20">
+              <div className="text-xs font-bold text-danger uppercase tracking-wider mb-1">What happened?</div>
+              <p className="text-sm text-foreground leading-relaxed">{investigation.cause}</p>
+            </div>
+
+            {investigation.contributingFactors.length > 0 && (
+              <div className="p-3 rounded-lg bg-warning/5 border border-warning/20">
+                <div className="text-xs font-bold text-warning uppercase tracking-wider mb-1">Why did it happen? (contributing factors)</div>
+                <ul className="space-y-1">
+                  {investigation.contributingFactors.map((f, i) => (
+                    <li key={`factor-${i}`} className="text-sm text-foreground flex items-start gap-1.5">
+                      <span className="text-warning mt-1">•</span>{f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="p-3 rounded-lg bg-muted/40 border border-border">
+                <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-1">Systems involved</div>
+                <div className="flex flex-wrap gap-1">
+                  {investigation.systemsInvolved.map(s => (
+                    <span key={s} className="badge badge-neutral text-[9px] normal-case">{s}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-info/5 border border-info/20">
+                <div className="text-xs font-bold text-info uppercase tracking-wider mb-1">What could have been done differently?</div>
+                <ul className="space-y-1">
+                  {investigation.whatCouldHaveBeenDone.map((f, i) => (
+                    <li key={`fix-${i}`} className="text-xs text-foreground flex items-start gap-1.5">
+                      <span className="text-info mt-0.5">→</span>{f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg bg-accent/5 border border-accent/20 flex items-start gap-2">
+              <Lightbulb size={14} className="text-accent mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-foreground leading-relaxed">
+                <strong className="text-accent">Educational lesson: </strong>
+                {investigation.educationalLesson}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Mission Lessons ── */}
+      <div className="space-card p-6 mb-6 border-info/30">
         <div className="flex items-center gap-2 mb-4">
           <BookOpen size={18} className="text-info" />
           <h2 className="text-base font-bold text-foreground">What Did You Learn?</h2>
         </div>
         <div className="space-y-4">
-          {record.lessons.map((lesson, i) => (
+          {result.lessons.map((lesson, i) => (
             <div key={`lesson-${i}`} className="p-4 rounded-lg bg-info/5 border border-info/20">
               <div className="text-xs font-semibold text-info uppercase tracking-wider mb-1">{lesson.concept}</div>
               <p className="text-sm text-foreground leading-relaxed mb-2">{lesson.lesson}</p>
               <Link
-                href={`/learn${lesson.learnHref}`}
+                href={lesson.learnHref}
                 className="text-xs text-primary hover:text-primary/80 font-medium inline-flex items-center gap-1 transition-colors"
               >
                 <BookOpen size={10} />
                 Explore this concept
+                <ArrowRight size={10} />
               </Link>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Recommendations */}
-      {record.recommendations.length > 0 && (
-        <div className="space-card p-6 mb-6 border-warning/30 border">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Try Next</h2>
+      {/* ── Mission DNA at completion ── */}
+      <div className="space-card p-6 mb-6">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">
+          Final Mission DNA
+        </h2>
+        <DNABars dna={dna} showExplanations={false} dense />
+        <p className="text-[10px] text-muted-foreground mt-3 italic">
+          Educational summary of your configuration — not a professional engineering score.
+        </p>
+      </div>
+
+      {/* ── Recommendations ── */}
+      {result.recommendations.length > 0 && (
+        <div className="space-card p-6 mb-6 border-warning/30">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">How to Improve</h2>
           <div className="space-y-2">
-            {record.recommendations.map((rec, i) => (
+            {result.recommendations.map((rec, i) => (
               <div key={`rec-${i}`} className="flex items-start gap-2">
                 <AlertTriangle size={12} className="text-warning mt-0.5 flex-shrink-0" />
                 <span className="text-sm text-foreground">{rec}</span>
@@ -461,64 +312,40 @@ export default function MissionResultScreen({ record, replayMode, replayChangedL
         </div>
       )}
 
-      {/* Full mission report (collapsible) */}
-      <div className="space-card p-6 mb-6">
-        <button
-          onClick={() => setShowFullReport(!showFullReport)}
-          className="flex items-center justify-between w-full text-left"
-          aria-expanded={showFullReport}
-          aria-controls="full-mission-report"
-        >
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Full Mission Report</h2>
-          {showFullReport ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
-        </button>
-
-        {showFullReport && (
-          <div id="full-mission-report" className="mt-4 space-y-4 animate-fadeIn">
-            <ArchitectureDiagram mission={mission} compact />
-
-            {/* Communication transparency */}
-            <div className="p-3 rounded bg-info/5 border border-info/20">
-              <div className="text-xs font-semibold text-info uppercase tracking-wider mb-1">Communication delays (computed from real data)</div>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                One-way light-time: <span className="font-mono text-foreground">{record.commDelayInfo.oneWay}</span> ·
-                Round trip: <span className="font-mono text-foreground">{record.commDelayInfo.roundTrip}</span>.
-                {record.commDelayInfo.distanceNote}
-              </p>
-            </div>
-
-            <div className="p-3 rounded bg-muted/20 border border-border">
-              <p className="text-xs text-muted-foreground italic">
-                This mission report is a simplified educational simulation based on transparent rules —
-                not real engineering predictions. Destination facts come from NASA public datasets
-                (see About → Data Sources).
-              </p>
-            </div>
-          </div>
-        )}
+      {/* ── Actions ── */}
+      <div className="space-card p-6 mb-6 border-accent/30">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+          Understand Your Mission Deeper
+        </h2>
+        <p className="text-xs text-muted-foreground mb-4">
+          Compare an alternative design, replay a key decision, or review what you learned.
+        </p>
+        <div className="flex flex-col sm:flex-row items-center gap-3">
+          <Link href="/what-if-lab" className="btn-secondary w-full sm:w-auto justify-center">
+            Compare in What-If Lab
+          </Link>
+          <Link href="/replay" className="btn-secondary w-full sm:w-auto justify-center">
+            <RotateCcw size={14} />
+            Replay Mission
+          </Link>
+          <Link href="/learn" className="btn-secondary w-full sm:w-auto justify-center">
+            <BookOpen size={14} />
+            What Did You Learn?
+          </Link>
+          <button onClick={onRestart} className="btn-accent w-full sm:w-auto justify-center">
+            <Rocket size={16} />
+            Design New Mission
+          </button>
+        </div>
       </div>
 
-      {/* Action buttons */}
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-        <button onClick={() => router.push('/mission-designer')} className="btn-accent text-base px-8 py-3">
-          <Rocket size={18} />
-          Design New Mission
-        </button>
-        <Link href="/learn" className="btn-secondary text-base px-8 py-3">
-          <BookOpen size={18} />
-          Learn More
-        </Link>
-        <Link href="/" className="btn-secondary text-base px-8 py-3">
-          <RotateCcw size={18} />
-          Return Home
-        </Link>
-      </div>
-
-      {/* Educational disclaimer */}
+      {/* Disclaimer */}
       <div className="text-center mt-8">
-        <p className="text-xs text-muted-foreground">
-          ꜱᴘᴀᴄᴇ ᴍɪꜱꜱɪᴏɴ ᴅᴇꜱɪɢɴᴇʀ is an independent educational project for NASA Space Apps Challenge 2026.
-          Mission outcomes are simplified simulations, not real engineering assessments.
+        <p className="text-xs text-muted-foreground max-w-2xl mx-auto leading-relaxed">
+          ꜱᴘᴀᴄᴇ ᴍɪꜱꜱɪᴏɴ ᴅᴇꜱɪɢɴᴇʀ is an independent educational project for the NASA Space Apps
+          Challenge 2026. Mission outcomes are simplified educational simulations, not real
+          engineering assessments. Destination data from NASA public datasets — see
+          the <Link href="/about" className="text-primary hover:underline">Data Sources</Link> section.
         </p>
       </div>
     </div>

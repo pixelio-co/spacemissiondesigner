@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import type {
   MissionState,
   MissionObjective,
@@ -11,8 +11,20 @@ import type {
   Power,
   Communication,
 } from './missionData';
-import { loadActiveMission, saveActiveMission, clearActiveMission } from './missionHistory';
 
+import {
+  saveActiveMission,
+  clearActiveMission,
+  clearMissionResult,
+  subscribeSession,
+  getSessionState,
+} from './missionArchive';
+
+/**
+ * The empty starting state for a brand-new mission. Nothing is auto-created on
+ * page load: a mission only comes into existence once the user makes a design
+ * choice in the Mission Designer.
+ */
 export const DEFAULT_MISSION_STATE: MissionState = {
   missionName: '',
   objective: null,
@@ -26,50 +38,52 @@ export const DEFAULT_MISSION_STATE: MissionState = {
   completedStages: [],
 };
 
+// Stable identity so useSyncExternalStore snapshots don't thrash when there is
+// no active mission.
+const EMPTY_DRAFT: MissionState = { ...DEFAULT_MISSION_STATE };
+
+function currentDraft(): MissionState {
+  return getSessionState().activeMission ?? EMPTY_DRAFT;
+}
+
+/** Apply an update to the active draft, creating it on first edit. */
+function updateDraft(next: MissionState | ((draft: MissionState) => MissionState)): void {
+  const base = currentDraft();
+  saveActiveMission(typeof next === 'function' ? next(base) : next);
+}
+
+/**
+ * Single source of truth for the mission being designed.
+ *
+ * Backed by the in-memory session store, so every route that calls this hook
+ * sees the same mission within one browser session, and a page refresh resets
+ * it to the empty draft. All persistence has been removed.
+ */
 export function useMissionStore() {
-  const [mission, setMission] = useState<MissionState>(() => {
-    // Restore an in-progress design across navigations (SSR-safe: on the
-    // server this returns the default; hydration re-syncs below).
-    if (typeof window !== 'undefined') {
-      return loadActiveMission() ?? { ...DEFAULT_MISSION_STATE };
-    }
-    return { ...DEFAULT_MISSION_STATE };
-  });
-  const hydratedRef = useRef(false);
-
-  // Re-sync after hydration in case the first render used defaults.
-  useEffect(() => {
-    if (hydratedRef.current) return;
-    hydratedRef.current = true;
-    const stored = loadActiveMission();
-    if (stored) {
-      setMission(prev => ({ ...prev, ...stored }));
-    }
-  }, []);
-
-  // Persist every change so the design survives navigation and refreshes.
-  useEffect(() => {
-    saveActiveMission(mission);
-  }, [mission]);
+  const mission = useSyncExternalStore(
+    subscribeSession,
+    () => getSessionState().activeMission,
+    () => null,
+  ) ?? EMPTY_DRAFT;
 
   const updateMissionName = useCallback((name: string) => {
-    setMission(prev => ({ ...prev, missionName: name }));
+    updateDraft(prev => ({ ...prev, missionName: name }));
   }, []);
 
   const updateObjective = useCallback((objective: MissionObjective) => {
-    setMission(prev => ({ ...prev, objective }));
+    updateDraft(prev => ({ ...prev, objective }));
   }, []);
 
   const updateDestination = useCallback((destination: Destination) => {
-    setMission(prev => ({ ...prev, destination }));
+    updateDraft(prev => ({ ...prev, destination }));
   }, []);
 
   const updateSpacecraft = useCallback((spacecraft: SpacecraftType) => {
-    setMission(prev => ({ ...prev, spacecraft }));
+    updateDraft(prev => ({ ...prev, spacecraft }));
   }, []);
 
   const toggleInstrument = useCallback((instrument: Instrument) => {
-    setMission(prev => ({
+    updateDraft(prev => ({
       ...prev,
       instruments: prev.instruments.includes(instrument)
         ? prev.instruments.filter(i => i !== instrument)
@@ -78,19 +92,19 @@ export function useMissionStore() {
   }, []);
 
   const updatePropulsion = useCallback((propulsion: Propulsion) => {
-    setMission(prev => ({ ...prev, propulsion }));
+    updateDraft(prev => ({ ...prev, propulsion }));
   }, []);
 
   const updatePower = useCallback((power: Power) => {
-    setMission(prev => ({ ...prev, power }));
+    updateDraft(prev => ({ ...prev, power }));
   }, []);
 
   const updateCommunication = useCallback((communication: Communication) => {
-    setMission(prev => ({ ...prev, communication }));
+    updateDraft(prev => ({ ...prev, communication }));
   }, []);
 
   const goToStage = useCallback((stage: number) => {
-    setMission(prev => ({
+    updateDraft(prev => ({
       ...prev,
       currentStage: stage,
       completedStages: prev.completedStages.includes(stage - 1)
@@ -100,7 +114,7 @@ export function useMissionStore() {
   }, []);
 
   const completeStage = useCallback((stage: number) => {
-    setMission(prev => ({
+    updateDraft(prev => ({
       ...prev,
       completedStages: prev.completedStages.includes(stage)
         ? prev.completedStages
@@ -110,13 +124,26 @@ export function useMissionStore() {
   }, []);
 
   const resetMission = useCallback(() => {
-    setMission({ ...DEFAULT_MISSION_STATE });
     clearActiveMission();
+    clearMissionResult();
+  }, []);
+
+  // Adopt a complete mission as the active draft (e.g. applying a What-If
+  // change), so the designer continues from that configuration.
+  const loadMission = useCallback((next: MissionState) => {
+    updateDraft({
+      ...next,
+      currentStage: Math.min(Math.max(next.currentStage, 0), 8),
+      completedStages: next.completedStages.filter(s => s >= 0 && s <= 8),
+    });
   }, []);
 
   const getProgressPercent = useCallback(() => {
-    const totalStages = 10;
-    return Math.round((mission.completedStages.length / totalStages) * 100);
+    // 9 design stages (0–8); Launch (9) is reached, not designed.
+    const designed = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter(stageId =>
+      mission.completedStages.includes(stageId)
+    ).length;
+    return Math.round((designed / 9) * 100);
   }, [mission.completedStages]);
 
   return {
@@ -132,6 +159,7 @@ export function useMissionStore() {
     goToStage,
     completeStage,
     resetMission,
+    loadMission,
     getProgressPercent,
   };
 }

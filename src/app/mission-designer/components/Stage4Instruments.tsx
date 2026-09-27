@@ -2,11 +2,9 @@
 
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
-import { INSTRUMENTS, SPACECRAFT_TYPES, DESTINATIONS, type Instrument } from '@/lib/missionData';
-import { INSTRUMENT_EDUCATION } from '@/lib/missionRules';
-import { evaluateDiscoveries } from '@/lib/scienceEngine';
-import OptionEducationBlock from './OptionEducationBlock';
-import InfoExpand from '@/components/ui/InfoExpand';
+import { INSTRUMENTS, SPACECRAFT_TYPES, type Instrument } from '@/lib/missionData';
+import { INSTRUMENT_EDUCATION, STAGE_EDUCATION } from '@/lib/missionEducation';
+import WhyItMatters from '@/components/ui/WhyItMatters';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -94,6 +92,13 @@ export default function Stage4Instruments({ store }: Props) {
               {isSelected && (
                 <div className="mt-2 text-xs text-accent font-medium">✓ Selected</div>
               )}
+              {isSelected && (
+                <div className="mt-2 pt-2 border-t border-border/50">
+                  <div className="text-[10px] text-info/90 leading-snug">
+                    <strong>Enables:</strong> {INSTRUMENT_EDUCATION[key].whyItMatters}
+                  </div>
+                </div>
+              )}
             </button>
           );
         })}
@@ -108,45 +113,7 @@ export default function Stage4Instruments({ store }: Props) {
         </div>
       )}
 
-      {/* Discovery eligibility preview — instruments make specific science possible */}
-      {mission.destination && mission.instruments.length > 0 && (
-        <div className="p-4 rounded-lg bg-card border border-border">
-          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Science Your Instruments Enable at {DESTINATIONS[mission.destination].label}
-            </h3>
-            <span className="badge badge-neutral text-[9px]">Eligibility preview</span>
-          </div>
-          <InfoExpand title="How does this work?" icon="idea" defaultOpen={false}>
-            Each instrument family can detect specific phenomena — a spectrometer reads composition,
-            radar sees below the surface. Eligibility is necessary but not sufficient: discoveries
-            also depend on conditions during flight, so nothing is guaranteed.
-          </InfoExpand>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 mt-2">
-            {evaluateDiscoveries(mission).map(el => (
-              <div
-                key={`disc-preview-${el.type.id}`}
-                className={`flex items-start gap-2 text-xs p-2 rounded ${el.eligible ? 'bg-success/5 border border-success/20' : 'bg-muted/20 border border-border opacity-60'}`}
-              >
-                <span className={el.eligible ? 'text-success mt-0.5' : 'text-muted-foreground mt-0.5'}>{el.eligible ? '✓' : '—'}</span>
-                <div className="min-w-0">
-                  <div className={el.eligible ? 'text-foreground font-medium' : 'text-muted-foreground'}>
-                    {el.type.label}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground leading-snug">{el.reason}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {mission.instruments.length > 0 && (
-        <OptionEducationBlock
-          education={INSTRUMENT_EDUCATION[mission.instruments[mission.instruments.length - 1]]}
-          optionLabel={INSTRUMENTS[mission.instruments[mission.instruments.length - 1]].label}
-        />
-      )}
+      <WhyItMatters education={STAGE_EDUCATION.instruments} compact />
     </div>
   );
 }

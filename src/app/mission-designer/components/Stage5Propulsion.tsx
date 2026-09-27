@@ -3,8 +3,8 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { PROPULSION_SYSTEMS, DESTINATIONS, type Propulsion } from '@/lib/missionData';
-import { PROPULSION_EDUCATION } from '@/lib/missionRules';
-import OptionEducationBlock from './OptionEducationBlock';
+import { PROPULSION_EDUCATION, STAGE_EDUCATION } from '@/lib/missionEducation';
+import WhyItMatters from '@/components/ui/WhyItMatters';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -92,11 +92,15 @@ export default function Stage5Propulsion({ store }: Props) {
         })}
       </div>
 
+      <WhyItMatters education={STAGE_EDUCATION.propulsion} compact />
+
       {mission.propulsion && (
-        <OptionEducationBlock
-          education={PROPULSION_EDUCATION[mission.propulsion]}
-          optionLabel={PROPULSION_SYSTEMS[mission.propulsion].label}
-        />
+        <div className="p-3 rounded-lg bg-muted/30 border border-border animate-fadeIn">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            <strong className="text-foreground">Trade-off:</strong>{' '}
+            {PROPULSION_EDUCATION[mission.propulsion].tradeOff}
+          </p>
+        </div>
       )}
     </div>
   );

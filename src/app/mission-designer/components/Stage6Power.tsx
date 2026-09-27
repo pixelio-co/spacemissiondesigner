@@ -3,10 +3,9 @@
 import React from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { POWER_SYSTEMS, DESTINATIONS, type Power } from '@/lib/missionData';
-import { POWER_EDUCATION } from '@/lib/missionRules';
-import { DESTINATION_FACTS } from '@/lib/spaceData';
-import OptionEducationBlock from './OptionEducationBlock';
-import InfoExpand from '@/components/ui/InfoExpand';
+import { getDestinationFacts, relativeSunlight } from '@/lib/spaceData';
+import { POWER_EDUCATION, STAGE_EDUCATION } from '@/lib/missionEducation';
+import WhyItMatters from '@/components/ui/WhyItMatters';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -15,32 +14,23 @@ interface Props {
 export default function Stage6Power({ store }: Props) {
   const { mission, updatePower } = store;
   const destInfo = mission.destination ? DESTINATIONS[mission.destination] : null;
-  const destFacts = mission.destination ? DESTINATION_FACTS[mission.destination] : null;
 
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-bold text-foreground mb-1">Power System</h2>
         <p className="text-sm text-muted-foreground">
-          Choose how your spacecraft gets energy. Your destination strongly affects which power
-          system can do the job.
+          How will your spacecraft generate electricity? Your destination strongly affects which power system is suitable.
         </p>
       </div>
 
-      {destInfo && destFacts && (
+      {destInfo && (
         <div className="p-3 rounded-lg bg-info/10 border border-info/30">
           <p className="text-xs text-info/90">
-            <strong>{destInfo.label}</strong> orbits at {destFacts.distanceFromSunAu} AU from the Sun.
-            Sunlight there provides about <strong>{destFacts.solarIlluminationPercentOfEarth}%</strong> of
-            what a panel receives at Earth (inverse-square law).
-            {['outer', 'deep'].includes(destInfo.distanceCategory) && ' This is why real missions this far out choose radioisotope power.'}
-            {['near', 'inner'].includes(destInfo.distanceCategory) && ' Solar power is generally viable at this distance.'}
+            <strong>Destination note:</strong> {destInfo.label} is a <strong>{destInfo.distanceCategory}</strong> destination.
+            {['outer', 'deep'].includes(destInfo.distanceCategory) && ' Solar power is significantly reduced at this distance — consider RPS.'}
+            {['near', 'inner'].includes(destInfo.distanceCategory) && ' Solar power is viable at this distance.'}
           </p>
-          <InfoExpand title="Why does sunlight fade with distance?" icon="idea">
-            Light spreads out as it travels, so the energy passing through a given area drops with the
-            <strong> square</strong> of the distance. Double the distance from the Sun → one quarter the
-            sunlight. At 10 AU (Saturn) a panel collects ~1% of what it would at Earth.
-          </InfoExpand>
         </div>
       )}
 
@@ -78,6 +68,15 @@ export default function Stage6Power({ store }: Props) {
                 </div>
               )}
 
+              {destInfo && key === 'solar' && mission.destination && (() => {
+                const rel = relativeSunlight(mission.destination);
+                return rel !== null ? (
+                  <div className="text-[10px] text-muted-foreground italic">
+                    Sunlight here ≈ {Math.round(rel * 100)}% of Earth levels (NASA data)
+                  </div>
+                ) : null;
+              })()}
+
               <div className="space-y-1">
                 {pwr.advantages.slice(0, 2).map((adv, i) => (
                   <div key={`pwr-adv-${key}-${i}`} className="text-xs text-muted-foreground flex items-start gap-1">
@@ -95,11 +94,15 @@ export default function Stage6Power({ store }: Props) {
         })}
       </div>
 
+      <WhyItMatters education={STAGE_EDUCATION.power} compact />
+
       {mission.power && (
-        <OptionEducationBlock
-          education={POWER_EDUCATION[mission.power]}
-          optionLabel={POWER_SYSTEMS[mission.power].label}
-        />
+        <div className="p-3 rounded-lg bg-muted/30 border border-border animate-fadeIn">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            <strong className="text-foreground">Trade-off:</strong>{' '}
+            {POWER_EDUCATION[mission.power].tradeOff}
+          </p>
+        </div>
       )}
     </div>
   );

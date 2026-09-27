@@ -4,15 +4,18 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import AppLogo from '@/components/ui/AppLogo';
-import { Menu, X, Rocket, BookOpen, Satellite, Info } from 'lucide-react';
+import { Menu, X, Rocket, Satellite, BookOpen, FlaskConical, Info, BarChart3 } from 'lucide-react';
 import Icon from '@/components/ui/AppIcon';
 
 
 const navItems = [
   { label: 'Home', href: '/', icon: Rocket },
   { label: 'Mission Designer', href: '/mission-designer', icon: Satellite },
+  { label: 'Simulation', href: '/mission-simulation-screen', icon: Satellite },
+  { label: 'Results', href: '/mission-result', icon: BarChart3 },
   { label: 'Learn', href: '/learn', icon: BookOpen },
-  { label: 'About', href: '/about', icon: Info },
+  { label: 'About', href: '/about', icon: FlaskConical },
+  { label: 'What-If Lab', href: '/what-if-lab', icon: Info },
 ];
 
 export default function AppNav() {

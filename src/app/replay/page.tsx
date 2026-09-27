@@ -1,19 +1,19 @@
 import React from 'react';
 import AppNav from '@/components/AppNav';
 import AppFooter from '@/components/AppFooter';
-import LearnClient from './LearnClient';
+import ReplayClient from './ReplayClient';
 
 export const metadata = {
-  title: 'Learn — ꜱᴘᴀᴄᴇ ᴍɪꜱꜱɪᴏɴ ᴅᴇꜱɪɢɴᴇʀ',
-  description: 'What did you learn? Space mission concepts explained from your own mission history.',
+  title: 'Replay Mission — ꜱᴘᴀᴄᴇ ᴍɪꜱꜱɪᴏɴ ᴅᴇꜱɪɢɴᴇʀ',
+  description: 'Replay your mission changing one major decision and compare outcomes.',
 };
 
-export default function LearnPage() {
+export default function ReplayPage() {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <AppNav />
       <main className="flex-1 pt-16">
-        <LearnClient />
+        <ReplayClient />
       </main>
       <AppFooter />
     </div>

@@ -1,87 +1,82 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+/**
+ * SimulationClient — orchestrates the mission simulation.
+ *
+ * Rebuilt around the transparent simulation engine:
+ * - 8-phase timeline (launch → cruise → approach → encounter → science →
+ *   data collection → transmission → complete) highlighted as it runs.
+ * - Events fire from configuration predicates + weighted randomness (no two
+ *   runs identical, but the config clearly matters).
+ * - Communication uses real one-way light-time: "Command sent" →
+ *   "SIGNAL IN TRANSIT" → "Spacecraft receives command".
+ * - Science is gated by instrument eligibility (camera → imaging, radar →
+ *   subsurface, etc.) and run as transparent probabilistic checks.
+ * - Decisions feed a science modifier; outcomes use the actual run history.
+ * - Completed missions are archived for the Replay + Learn pages.
+ */
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { Rocket, AlertTriangle } from 'lucide-react';
-import type { MissionState, MissionObjective, Destination, SpacecraftType, Instrument, Propulsion, Power, Communication } from '@/lib/missionData';
-import { DESTINATIONS } from '@/lib/missionData';
+import type { MissionState, MissionResultData } from '@/lib/missionData';
+import { DESTINATIONS, SPACECRAFT_TYPES, calculateMissionScores } from '@/lib/missionData';
 import {
-  runMission,
-  resolveAutonomy,
-  configurationFactors,
+  loadActiveMission,
+  clearActiveMission,
+  clearMissionResult,
+  saveCompletedMission,
+  saveLearnedLessons,
+  saveMissionResult,
+  type MissionRecord,
+} from '@/lib/missionArchive';
+import { computeMissionDNA } from '@/lib/missionDNA';
+import {
+  MISSION_PHASES,
+  makeLogId,
+  getCommDelay,
+  runScienceChecks,
+  computeMissionOutcome,
+  buildInvestigation,
+  buildLessons,
+  selectEligibleEvents,
+  pickEvent,
+  configSummary,
+  type SimPhase,
+  type LogEntry,
+  type SystemStatus,
+  type MissionEventDef,
+  type DecisionDef,
+  type DecisionOption,
+  type ScienceStats,
+  type EventCategory,
 } from '@/lib/simulationEngine';
-import type { SimulationRecord, MissionEvent, AutonomyChoice, RunResult } from '@/lib/simulationEngine';
-import type { SystemStatus } from '@/lib/simTypes';
-import { AUTONOMY_OPTIONS, SCENARIO_DEFINITIONS } from '@/lib/simTypes';
-import { saveMissionRecord, clearActiveMission } from '@/lib/missionHistory';
 import MissionControlDashboard from './MissionControlDashboard';
 import DecisionModal from './DecisionModal';
-import AutonomyModal from './AutonomyModal';
 import MissionResultScreen from './MissionResultScreen';
 
-// Unique log IDs — never array indexes (per project convention).
-let _logIdCounter = 0;
-function createUniqueLogId(): string {
-  _logIdCounter += 1;
-  return `log-${Date.now()}-${_logIdCounter}`;
+export type { SimPhase, LogEntry, SystemStatus };
+
+interface Props {
+  /** When replaying, this mission is simulated instead of the stored one. */
+  overrideMission?: MissionState | null;
+  onMissionComplete?: (record: {
+    result: MissionResultData;
+    science: ScienceStats;
+    events: { category: EventCategory; title: string }[];
+    decisions: string[];
+  }) => void;
 }
 
-export interface LogEntry {
-  id: string;
-  time: string;
-  message: string;
-  cause?: string;
-  type: 'success' | 'warning' | 'danger' | 'info' | 'neutral';
-}
-
-export type SimPhase =
-  | 'pre-launch' | 'launch' | 'transit' | 'approach' | 'operations' | 'complete';
-
-function phaseForProgress(progress: number): SimPhase {
-  if (progress >= 95) return 'complete';
-  if (progress >= 55) return 'operations';
-  if (progress >= 40) return 'approach';
-  if (progress >= 12) return 'transit';
-  return 'launch';
-}
-
-/**
- * Phase label for in-run events. Only reaching 100% progress marks the mission
- * complete — an event firing at 97% must NOT flip the phase to 'complete',
- * because that stops the simulation clock before the run can finish.
- */
-function phaseForEventProgress(progress: number): SimPhase {
-  if (progress >= 95) return 'operations';
-  return phaseForProgress(progress);
-}
-
-interface TransitSignal {
-  label: string;
-  progress: number;
-}
-
-function buildMissionFromParams(params: URLSearchParams): MissionState {
-  return {
-    missionName: params.get('missionName') || 'Mission Alpha',
-    objective: (params.get('objective') as MissionObjective) || null,
-    destination: (params.get('destination') as Destination) || null,
-    spacecraft: (params.get('spacecraft') as SpacecraftType) || null,
-    instruments: (params.get('instruments') || '').split(',').filter(Boolean) as Instrument[],
-    propulsion: (params.get('propulsion') as Propulsion) || null,
-    power: (params.get('power') as Power) || null,
-    communication: (params.get('communication') as Communication) || null,
-    currentStage: 9,
-    completedStages: [0, 1, 2, 3, 4, 5, 6, 7, 8],
-  };
-}
-
-function hasActiveMission(params: URLSearchParams): boolean {
-  const destination = params.get('destination');
-  const spacecraft = params.get('spacecraft');
-  const objective = params.get('objective');
-  return Boolean(destination && spacecraft && objective);
-}
+const INITIAL_SYSTEMS: SystemStatus = {
+  power: 100,
+  communication: 100,
+  propulsion: 100,
+  instruments: 100,
+  navigation: 100,
+  radiation: 0,
+};
 
 function NoActiveMission() {
   const router = useRouter();
@@ -93,7 +88,7 @@ function NoActiveMission() {
         </div>
         <h2 className="text-2xl font-bold text-foreground mb-3">No Active Mission</h2>
         <p className="text-muted-foreground mb-8 leading-relaxed">
-          Create and launch a mission before entering Mission Simulation.
+          Create and launch a mission before entering Mission Control.
           <br />
           <span className="text-sm mt-2 block">
             Design your spacecraft, choose your destination, and configure all systems
@@ -112,326 +107,354 @@ function NoActiveMission() {
   );
 }
 
-export default function SimulationClient() {
-  const searchParams = useSearchParams();
+export default function SimulationClient({ overrideMission = null, onMissionComplete }: Props = {}) {
   const router = useRouter();
 
-  const missionActive = hasActiveMission(searchParams);
-  const mission = useMemo(() => buildMissionFromParams(searchParams), [searchParams]);
-  const replayId = searchParams.get('replay');
-  const replayAutonomy = searchParams.get('autonomy') as AutonomyChoice | null;
-  const replayLabel = searchParams.get('replayLabel');
-  const replayDecisionId = searchParams.get('replayDecision');
-  const replayChoiceRaw = searchParams.get('replayChoice');
-  const originalRecordId = searchParams.get('originalRecord');
-  // Pre-scripted replay: every decision is answered from the original run so
-  // only the changed decision (in replayDecision/replayChoice, or overridden in
-  // replayChoices JSON) differs from the original mission.
-  const replayChoicesRaw = searchParams.get('replayChoices');
-  const scriptedDecisions = useMemo<Record<string, number>>(() => {
-    if (!replayChoicesRaw) return {};
-    try {
-      const parsed = JSON.parse(replayChoicesRaw) as Record<string, number>;
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
-      return Object.fromEntries(
-        Object.entries(parsed).filter(([, v]) => Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])
-      );
-    } catch {
-      return {};
-    }
-  }, [replayChoicesRaw]);
-
-  // Pre-compute the full mission story from the pure engine.
-  // Live player choices are fed back in as fixedDecisions/autonomy so the record
-  // always reflects what actually happened, not the engine's defaults.
-  const [playerDecisions, setPlayerDecisions] = useState<Record<string, number>>({});
-  const [playerAutonomy, setPlayerAutonomy] = useState<AutonomyChoice | null>(null);
-  const run: RunResult | null = useMemo(() => {
-    if (!missionActive) return null;
-    const opts: { autonomy?: AutonomyChoice; fixedDecisions?: Record<string, number> } = {};
-    if (Object.keys(scriptedDecisions).length > 0) opts.fixedDecisions = { ...scriptedDecisions };
-    if (replayDecisionId) {
-      const parsed = Number(replayChoiceRaw);
-      opts.fixedDecisions = { ...opts.fixedDecisions, [replayDecisionId]: Number.isFinite(parsed) ? parsed : 1 };
-    }
-    if (Object.keys(playerDecisions).length > 0) {
-      opts.fixedDecisions = { ...opts.fixedDecisions, ...playerDecisions };
-    }
-    if (replayAutonomy) opts.autonomy = replayAutonomy;
-    if (playerAutonomy) opts.autonomy = playerAutonomy;
-    return runMission(mission, opts);
-  }, [mission, missionActive, replayAutonomy, replayDecisionId, replayChoiceRaw, scriptedDecisions, playerDecisions, playerAutonomy]);
-
+  const [mission, setMission] = useState<MissionState | null>(null);
+  const [checked, setChecked] = useState(false);
   const [phase, setPhase] = useState<SimPhase>('pre-launch');
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [systems, setSystems] = useState<SystemStatus>({
-    power: 100, communication: 100, propulsion: 100, instruments: 100, navigation: 100, radiation: 0,
-  });
+  const [systems, setSystems] = useState<SystemStatus>({ ...INITIAL_SYSTEMS });
   const [progress, setProgress] = useState(0);
-  const [decisionEvent, setDecisionEvent] = useState<MissionEvent | null>(null);
-  const [autonomyOpen, setAutonomyOpen] = useState(false);
-  const [autonomyChoice, setAutonomyChoice] = useState<AutonomyChoice | null>(null);
-  const [transit, setTransit] = useState<TransitSignal | null>(null);
-  const [result, setResult] = useState<SimulationRecord | null>(null);
+  const [decisionPrompt, setDecisionPrompt] = useState<DecisionDef | null>(null);
+  const [pendingDecisionEvent, setPendingDecisionEvent] = useState<MissionEventDef | null>(null);
+  const [decisions, setDecisions] = useState<string[]>([]);
+  const [eventsFired, setEventsFired] = useState<{ category: EventCategory; title: string }[]>([]);
+  const [scienceModifier, setScienceModifier] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
-  const [currentDecisionLabel, setCurrentDecisionLabel] = useState<string>('None yet — awaiting events');
-  const [savedRecordId, setSavedRecordId] = useState<string | null>(null);
+  const [result, setResult] = useState<MissionResultData | null>(null);
+  const [resultScience, setResultScience] = useState<ScienceStats | null>(null);
+  const [commPing, setCommPing] = useState<'none' | 'sent' | 'in-transit' | 'received'>('none');
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
-  // Mutable run-state read by the interval tick (avoids effect re-subscription).
-  const runStateRef = useRef({
-    firedEvents: new Set<string>(),
-    pendingDecision: null as MissionEvent | null,
-    pendingAutonomy: false,
-    autonomyChosen: null as AutonomyChoice | null,
-    finished: false,
-  });
-  const playerChoicesRef = useRef({ decisions: {} as Record<string, number>, autonomy: null as AutonomyChoice | null });
+  // Mutable run state used inside the interval (avoids stale closures).
+  const firedEventsRef = useRef<Set<string>>(new Set());
+  const phaseIdxRef = useRef(0);
+  const pausedRef = useRef(false);
+  const eventLogRef = useRef<{ category: EventCategory; title: string }[]>([]);
+  const decisionsRef = useRef<string[]>([]);
+  const scienceModRef = useRef(0);
 
-  const addLog = useCallback((message: string, type: LogEntry['type'] = 'neutral', cause?: string) => {
-    const now = new Date();
-    const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-    const entry: LogEntry = { id: createUniqueLogId(), time, message, type, cause };
+  const addLog = useCallback((message: string, type: LogEntry['type'] = 'neutral', isDecision = false) => {
+    const entry: LogEntry = {
+      id: makeLogId(),
+      missionTime: `T+${String(Math.round(progress)).padStart(3, '0')}`,
+      message,
+      type,
+      isDecision,
+    };
     setLog(prev => [...prev, entry]);
-    setTimeout(() => {
-      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-    }, 50);
-  }, []);
+  }, [progress]);
 
-  const applyEffect = useCallback((effect?: Partial<SystemStatus>) => {
-    if (!effect) return;
+  // Hydrate mission: replay override → stored mission.
+  useEffect(() => {
+    if (overrideMission) {
+      setMission(overrideMission);
+      setChecked(true);
+      return;
+    }
+    setMission(loadActiveMission());
+    setChecked(true);
+  }, [overrideMission]);
+
+  const applySystemEffect = useCallback((effect: Partial<SystemStatus>) => {
     setSystems(prev => {
       const next = { ...prev };
       (Object.keys(effect) as (keyof SystemStatus)[]).forEach(key => {
-        next[key] = Math.max(0, Math.min(100, prev[key] + (effect[key] ?? 0)));
+        const delta = effect[key] ?? 0;
+        next[key] = Math.max(0, Math.min(100, prev[key] + delta));
       });
       return next;
     });
   }, []);
 
-  // Reset all run state (used by launch).
-  const resetRun = useCallback(() => {
-    // In a replay, decisions and autonomy come pre-scripted from the URL.
-    const replayMode = Boolean(replayId);
-    const scriptedAutonomy = replayMode ? (replayAutonomy ?? (Object.keys(scriptedDecisions).length > 0 ? 'continue-science' : null)) : null;
-    runStateRef.current = {
-      firedEvents: new Set(),
-      pendingDecision: null,
-      pendingAutonomy: false,
-      autonomyChosen: scriptedAutonomy,
-      finished: false,
-    };
-    playerChoicesRef.current = { decisions: replayMode ? scriptedDecisions : {}, autonomy: scriptedAutonomy };
-    setPlayerDecisions(replayMode ? scriptedDecisions : {});
-    setPlayerAutonomy(scriptedAutonomy);
-    setLog([]);
-    setSystems({ power: 100, communication: 100, propulsion: 100, instruments: 100, navigation: 100, radiation: 0 });
-    setProgress(0);
-    setDecisionEvent(null);
-    setAutonomyOpen(false);
-    setAutonomyChoice(scriptedAutonomy);
-    setTransit(null);
-    setResult(null);
-    setCurrentDecisionLabel('None yet — awaiting events');
-    setSavedRecordId(null);
-  }, [replayId, replayAutonomy, scriptedDecisions]);
-
-  const finishMission = useCallback((early = false) => {
-    if (runStateRef.current.finished || !run) return;
-    runStateRef.current.finished = true;
-    setPhase('complete');
-    setIsRunning(false);
-    if (early) {
-      addLog('CRITICAL — autonomous safing engaged. Mission ended early.', 'danger');
-    } else {
-      addLog('Mission complete. Compiling final report…', 'success');
+  const handleDecision = useCallback((option: DecisionOption) => {
+    if (!pendingDecisionEvent) return;
+    applySystemEffect(option.effect);
+    if (typeof option.scienceDelta === 'number') {
+      scienceModRef.current += option.scienceDelta;
+      setScienceModifier(scienceModRef.current);
     }
+    decisionsRef.current = [...decisionsRef.current, option.label];
+    setDecisions(decisionsRef.current);
+    addLog(`DECISION: ${option.label}`, 'info', true);
+    addLog(`Outcome: ${option.consequence}`, 'success');
+    if (option.lesson) {
+      addLog(`Lesson: ${option.lesson}`, 'neutral');
+    }
+    setDecisionPrompt(null);
+    setPendingDecisionEvent(null);
+    pausedRef.current = false;
+    toast.success(option.consequence);
+  }, [pendingDecisionEvent, applySystemEffect, addLog]);
 
-    const stored = saveMissionRecord(mission, run.record);
-    setSavedRecordId(stored.id);
-    setTimeout(() => setResult(run.record), 900);
-  }, [run, mission, addLog]);
+  const finishMission = useCallback((
+    finalMission: MissionState,
+    finalSystems: SystemStatus,
+    events: { category: EventCategory; title: string }[],
+    playerDecisions: string[],
+    mod: number,
+  ) => {
+    const { stats } = runScienceChecks(finalMission, finalSystems, mod);
+    const outcome = computeMissionOutcome(finalMission, finalSystems, stats, events.length);
+    const lessons = buildLessons(finalMission, finalSystems, stats, playerDecisions);
+    const investigation = buildInvestigation(outcome, finalSystems, events, playerDecisions);
+    const scores = calculateMissionScores(finalMission);
 
-  // The single stable interval — reads all live state from refs.
+    const missionResult: MissionResultData = {
+      type: outcome.category === 'successful' ? 'success'
+        : outcome.category === 'successful-with-challenges' ? 'success-challenges'
+        : outcome.category === 'partially-successful' ? 'partial'
+        : outcome.category === 'ended-early' ? 'failure'
+        : 'breakthrough',
+      title: outcome.label,
+      subtitle: outcome.subtitle,
+      // The legacy ScenarioType union is retired; the live engine's outcome
+      // category is the scenario of record. Cast keeps the result shape stable.
+      scenario: outcome.category as unknown as MissionResultData['scenario'],
+      objectivesCompleted: [
+        ...(stats.observationsCompleted > 0
+          ? [`${stats.observationsCompleted} scientific observations completed`]
+          : []),
+        ...(stats.instrumentsOperated > 0
+          ? [`${stats.instrumentsOperated} of ${finalMission.instruments.length} instruments operated successfully`]
+          : []),
+        ...(stats.majorFindings > 0
+          ? [`${stats.majorFindings} major scientific finding${stats.majorFindings === 1 ? '' : 's'}`]
+          : []),
+        ...(playerDecisions.length > 0
+          ? [`Autonomy decision: ${playerDecisions[playerDecisions.length - 1]}`]
+          : []),
+      ],
+      objectivesMissed: [
+        ...(stats.objectivesCompletedPercent < 100
+          ? [`${100 - stats.objectivesCompletedPercent}% of scientific objectives not completed`]
+          : []),
+        ...(finalSystems.power < 55 ? ['Full power margin maintained throughout the mission'] : []),
+        ...(finalSystems.communication < 55 ? ['Uninterrupted communication with Earth'] : []),
+      ],
+      eventsEncountered: events.map(e => e.title),
+      playerDecisionSummary: playerDecisions.length > 0
+        ? playerDecisions.join(' → ')
+        : 'No decision required',
+      lessons,
+      dataCollected: [
+        ...(stats.observationsCompleted > 0 ? [`${stats.dataReturned} of science data returned to Earth`] : []),
+        ...finalMission.instruments.map(i => {
+          const names: Record<string, string> = {
+            camera: 'Imaging data archived', spectrometer: 'Spectral data archived',
+            radar: 'Radar soundings archived', magnetometer: 'Magnetic field data archived',
+            thermal: 'Thermal maps archived', atmospheric: 'Atmospheric profiles archived',
+            radiation: 'Radiation measurements archived', seismometer: 'Seismic data archived',
+            particle: 'Particle/plasma data archived',
+          };
+          return names[i] ?? `${i} data archived`;
+        }),
+      ],
+      recommendations: outcome.category === 'partially-successful' || outcome.category === 'ended-early' ? [
+        ...(finalSystems.power < 55 ? ['Review your power system choice against your destination’s real sunlight level'] : []),
+        ...(finalSystems.communication < 55 ? ['A stronger communication system would return more of your science'] : []),
+        ...(finalMission.instruments.length > 5 ? ['Consider a smaller, focused instrument suite'] : []),
+      ] : [],
+    };
+
+    // Capture the finished run into the in-memory session archive so Replay,
+    // the Learn page and the result page can use it — for THIS session only.
+    const dna = computeMissionDNA(finalMission, scores);
+    const record: MissionRecord = {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      completedAt: Date.now(),
+      mission: finalMission,
+      result: missionResult,
+      dna,
+      scienceStats: stats,
+      timeline: events.map(e => ({
+        label: e.title,
+        status: (e.category === 'power' || e.category === 'comm' ? 'warn' : 'bad') as 'warn' | 'bad',
+      })),
+      keyDecision: missionResult.playerDecisionSummary,
+    };
+    saveCompletedMission(record);
+    saveLearnedLessons(lessons, finalMission.missionName || 'Mission Alpha');
+    saveMissionResult({
+      mission: finalMission,
+      result: missionResult,
+      science: stats,
+      investigation,
+      events,
+    });
+    // The run is finished history, not a draft: clear the active mission so the
+    // designer/What-If no longer show it as work in progress.
+    clearActiveMission();
+
+    setResult(missionResult);
+    setResultScience(stats);
+    // Expose investigation data to the result screen for this render.
+    (missionResult as MissionResultData & { investigation?: unknown }).investigation = investigation;
+
+    onMissionComplete?.({
+      result: missionResult,
+      science: stats,
+      events,
+      decisions: playerDecisions,
+    });
+  }, [onMissionComplete]);
+
+  const handleLaunch = useCallback(() => {
+    if (!mission) return;
+    setIsRunning(true);
+    setPhase('launch');
+    firedEventsRef.current = new Set();
+    phaseIdxRef.current = 0;
+    pausedRef.current = false;
+    eventLogRef.current = [];
+    decisionsRef.current = [];
+    scienceModRef.current = 0;
+    addLog(`LAUNCH SEQUENCE INITIATED for ${mission.missionName || 'Mission Alpha'}.`, 'info');
+    const delay = getCommDelay(mission.destination);
+    addLog(
+      `Note: one-way light time to ${mission.destination ? DESTINATIONS[mission.destination].label : 'target'} is ${delay.oneWayLabel}. Real-time control is impossible at this distance — autonomy matters.`,
+      'neutral',
+    );
+    toast.success('Mission launched! Monitoring all systems.');
+  }, [mission, addLog]);
+
+  // Main simulation loop.
   useEffect(() => {
-    if (!missionActive || !isRunning || phase === 'complete') return;
-    if (!run) return;
+    if (!mission || !isRunning || result) return;
+    const scores = calculateMissionScores(mission);
+    const delay = getCommDelay(mission.destination);
 
     const tick = () => {
-      const st = runStateRef.current;
+      if (pausedRef.current) return;
+
       setProgress(prev => {
-        const next = Math.min(prev + 1.2, 100);
-        // A lost mission stops the clock at its endProgress — not 100.
-        const stopAt = run.record.endedEarly ? run.record.endProgress : 100;
+        const next = prev + 1;
+        if (next >= 100) {
+          setPhase('complete');
+          setIsRunning(false);
+          addLog('MISSION COMPLETE. Compiling final report…', 'success');
+          setTimeout(() => {
+            finishMission(mission, systemsRef.current, eventLogRef.current, decisionsRef.current, scienceModRef.current);
+          }, 600);
+          return 100;
+        }
 
-        for (const ev of run.record.events) {
-          if (st.firedEvents.has(ev.id) || next < ev.atProgress) continue;
-          st.firedEvents.add(ev.id);
+        // Phase milestones
+        while (phaseIdxRef.current < MISSION_PHASES.length) {
+          const milestone = MISSION_PHASES[phaseIdxRef.current];
+          if (next >= milestone.at) {
+            setPhase(milestone.phase);
+            const phaseMsg: Record<string, string> = {
+              launch: 'Launch confirmed — spacecraft separated from the launch vehicle.',
+              cruise: `Cruise phase begins. En route to ${mission.destination ? DESTINATIONS[mission.destination].label : 'destination'}.`,
+              approach: 'Approach phase — optical navigation and final trajectory trim.',
+              encounter: 'ORBIT / ENCOUNTER — the spacecraft has arrived at its target.',
+              'science-operations': 'Science operations phase — instruments are acquiring data.',
+              'data-collection': 'Data collection continuing — observations are being stored onboard.',
+              'data-transmission': 'Data transmission phase — downlink to Earth in progress.',
+              complete: 'Mission complete.',
+            };
+            addLog(phaseMsg[milestone.id] ?? milestone.label, 'success');
+            phaseIdxRef.current += 1;
+          } else break;
+        }
 
-          setPhase(phaseForEventProgress(ev.atProgress));
-          addLog(ev.message, ev.type, ev.cause);
-          // Scenario damage is real: mirror the engine's system state live.
-          if (ev.systemEffect) applyEffect(ev.systemEffect);
+        // Periodic comm ping animation
+        if (next % 12 === 0 && decisionPrompt === null) {
+          setCommPing('sent');
+          setTimeout(() => setCommPing('in-transit'), 500);
+          setTimeout(() => {
+            setCommPing('received');
+            addLog(
+              `Spacecraft received command sent ${(delay.oneWaySeconds / 60).toFixed(1)} min ago (one-way light time).`,
+              'info',
+            );
+          }, Math.min(600 + delay.oneWaySeconds * 2, 2200));
+        }
 
-          if (ev.commDelay) {
-            // Educational transit demo: command → in transit → received.
-            setTransit({ label: 'COMMAND SENT', progress: 0 });
-            setTimeout(() => setTransit({ label: 'SIGNAL IN TRANSIT…', progress: 50 }), 900);
-            setTimeout(() => setTransit({ label: 'SPACECRAFT RECEIVES COMMAND', progress: 100 }), 2100);
-            setTimeout(() => setTransit(null), 4200);
-          }
-
-          // Pre-scripted replays never pause: their answer is already in
-          // playerChoicesRef and was resolved by the engine. Log the scripted
-          // choice so the replay tells the same story as the original run.
-          if (ev.requiresDecision && ev.scenario && playerChoicesRef.current.decisions[ev.id] !== undefined) {
-            const scripted = SCENARIO_DEFINITIONS[ev.scenario].decisionOptions[
-              Math.min(playerChoicesRef.current.decisions[ev.id], SCENARIO_DEFINITIONS[ev.scenario].decisionOptions.length - 1)
-            ];
-            addLog(`Decision: ${scripted.label}`, 'info');
-            addLog(scripted.consequence, 'success');
-          } else if (ev.requiresDecision && ev.scenario && !st.autonomyChosen) {
-            st.pendingDecision = ev;
-            setDecisionEvent(ev);
-            setIsRunning(false);
-          }
-          if (ev.autonomyPrompt && !st.autonomyChosen) {
-            st.pendingAutonomy = true;
-            setAutonomyOpen(true);
-            setIsRunning(false);
+        // Event selection (weighted by configuration)
+        if (!pausedRef.current && next > 12 && decisionPrompt === null) {
+          const eligible = selectEligibleEvents(mission, scores, next, firedEventsRef.current);
+          const ev = pickEvent(eligible, mission, scores);
+          if (ev && Math.random() < 0.02 + eligible.length * 0.008) {
+            firedEventsRef.current.add(ev.id);
+            eventLogRef.current = [...eventLogRef.current, { category: ev.category, title: ev.title }];
+            setEventsFired([...eventLogRef.current]);
+            applySystemEffect(ev.impact);
+            addLog(`⚠ ${ev.title}: ${ev.log}`, ev.logType);
+            if (ev.decision) {
+              pausedRef.current = true;
+              setTimeout(() => {
+                setPendingDecisionEvent(ev);
+                setDecisionPrompt(ev.decision ?? null);
+              }, 900);
+            }
           }
         }
 
-        if (next >= stopAt) {
-          finishMission(next < 100);
-        }
         return next;
       });
     };
 
-    timerRef.current = setInterval(tick, 170);
+    timerRef.current = setInterval(tick, 160);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
     };
-  }, [missionActive, isRunning, phase, run, addLog, applyEffect, finishMission]);
+  }, [mission, isRunning, result, applySystemEffect, addLog, finishMission, decisionPrompt]);
 
-  const handleDecision = useCallback((optionIndex: number, educationalWhy: string) => {
-    const st = runStateRef.current;
-    const ev = st.pendingDecision;
-    if (!ev || !ev.scenario) return;
-
-    const def = SCENARIO_DEFINITIONS[ev.scenario];
-    const opt = def.decisionOptions[Math.min(optionIndex, def.decisionOptions.length - 1)];
-    applyEffect(opt.effects);
-    setCurrentDecisionLabel(opt.label);
-    addLog(`Decision: ${opt.label}`, 'info');
-    addLog(opt.consequence, 'success');
-    addLog(`Why: ${opt.educationalWhy}`, 'neutral');
-    toast.success(opt.consequence);
-    st.pendingDecision = null;
-    playerChoicesRef.current.decisions[ev.id] = optionIndex;
-    setPlayerDecisions({ ...playerChoicesRef.current.decisions });
-    setDecisionEvent(null);
-    setIsRunning(true);
-  }, [applyEffect, addLog]);
-
-  const handleAutonomyChoice = useCallback((choice: AutonomyChoice) => {
-    const st = runStateRef.current;
-    const outcome = resolveAutonomy(choice, configurationFactors(mission), systems);
-    applyEffect(outcome.effects);
-    setAutonomyChoice(choice);
-    setCurrentDecisionLabel(`Autonomy: ${outcome.label}`);
-    addLog(`Autonomous behavior: ${outcome.label}`, 'info');
-    addLog(outcome.description, 'warning');
-    addLog(outcome.educationalNote, 'neutral');
-    toast.info(outcome.label);
-    st.pendingAutonomy = false;
-    st.autonomyChosen = choice;
-    playerChoicesRef.current.autonomy = choice;
-    setPlayerAutonomy(choice);
-    setAutonomyOpen(false);
-    setIsRunning(true);
-  }, [mission, systems, applyEffect, addLog]);
-
-  const handleLaunch = useCallback(() => {
-    resetRun();
-    setIsRunning(true);
-    setPhase('launch');
-    addLog(`T+0 — ${mission.missionName || 'Mission Alpha'} launch sequence initiated.`, 'info');
-    toast.success('Mission launched! Monitoring all systems.');
-  }, [mission.missionName, resetRun, addLog]);
-
-  // Auto-launch on arrival: arriving from the designer (or refreshing this page)
-  // starts the mission immediately — no second Launch click required. Keyed to
-  // the mission signature so a replay navigation (same page, new params) also
-  // re-runs instead of showing the stale previous result.
-  const missionSignature = [
-    searchParams.get('objective'),
-    searchParams.get('destination'),
-    searchParams.get('spacecraft'),
-    searchParams.get('instruments'),
-    searchParams.get('propulsion'),
-    searchParams.get('power'),
-    searchParams.get('communication'),
-    searchParams.get('replay'),
-    searchParams.get('autonomy'),
-    searchParams.get('replayLabel'),
-    searchParams.get('replayDecision'),
-    searchParams.get('replayChoice'),
-    searchParams.get('replayChoices'),
-  ].join('|');
-  const launchedForRef = useRef<string | null>(null);
+  // Keep a ref of systems for the completion path.
+  const systemsRef = useRef<SystemStatus>({ ...INITIAL_SYSTEMS });
   useEffect(() => {
-    if (!missionActive || !run) return;
-    if (launchedForRef.current === missionSignature) return;
-    launchedForRef.current = missionSignature;
-    handleLaunch();
-  }, [missionActive, run, handleLaunch, missionSignature]);
+    systemsRef.current = systems;
+  }, [systems]);
 
-  // The launched mission lives entirely in the URL params. Once the simulation
-  // page holds it, clear the stored designer draft so returning to the designer
-  // starts a new design (one-time flight) — without repainting the designer at
-  // stage 0 mid-navigation.
+  // Auto-scroll log
   useEffect(() => {
-    if (missionActive) clearActiveMission();
-  }, [missionActive]);
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [log]);
 
-  // Guard: show no-active-mission screen if mission params are missing.
-  if (!missionActive || !run) {
+  if (!checked) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-muted-foreground text-lg">Initializing Mission Control…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!mission) {
     return <NoActiveMission />;
   }
 
   if (result) {
     return (
       <MissionResultScreen
-        record={result}
-        replayMode={Boolean(replayId)}
-        replayChangedLabel={replayLabel}
-        savedRecordId={savedRecordId}
-        originalRecordId={originalRecordId}
+        result={result}
+        mission={mission}
+        science={resultScience}
+        investigation={(result as MissionResultData & { investigation?: import('@/lib/simulationEngine').InvestigationNode }).investigation ?? null}
+        events={eventsFired}
+        onRestart={() => {
+          // "Design New Mission" starts a truly fresh session mission: clear
+          // both the active mission and the current result, then return to the
+          // designer. Completed runs stay in the in-memory archive for Replay
+          // while this browser session remains open.
+          clearMissionResult();
+          clearActiveMission();
+          router.push('/mission-designer');
+        }}
       />
     );
   }
 
-  const visibleDiscoveries = run.record.discoveries.filter(d => {
-    const opProgress = Number(d.time.replace('OPS+', '').replace('d', '')) / 1.8;
-    return progress >= opProgress;
-  });
-
   return (
     <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-6">
-      {replayId && (
-        <div className="mb-4 p-3 rounded-lg bg-accent/10 border border-accent/30 flex items-center gap-2 flex-wrap">
-          <span className="badge badge-warning text-[9px]">REPLAY</span>
-          <p className="text-xs text-accent/90">
-            Testing one changed decision{replayLabel ? `: ${replayLabel}` : ''}. Compare the outcome
-            with your original mission at the end.
-          </p>
-        </div>
-      )}
-
       <MissionControlDashboard
         mission={mission}
         phase={phase}
@@ -441,25 +464,17 @@ export default function SimulationClient() {
         logRef={logRef}
         isRunning={isRunning}
         onLaunch={handleLaunch}
-        transit={transit}
-        autonomyChoice={autonomyChoice}
-        currentDecisionLabel={currentDecisionLabel}
-        discoveries={visibleDiscoveries}
+        commPing={commPing}
+        events={eventsFired}
+        decisions={decisions}
+        scienceModifier={scienceModifier}
+        configSummary={configSummary(mission)}
       />
 
-      {decisionEvent && (
+      {decisionPrompt && (
         <DecisionModal
-          event={decisionEvent}
+          prompt={decisionPrompt}
           onDecide={handleDecision}
-        />
-      )}
-
-      {autonomyOpen && (
-        <AutonomyModal
-          options={AUTONOMY_OPTIONS}
-          onChoose={handleAutonomyChoice}
-          destinationLabel={mission.destination ? DESTINATIONS[mission.destination].label : ''}
-          oneWayDelay={run.record.commDelayInfo.oneWay}
         />
       )}
     </div>

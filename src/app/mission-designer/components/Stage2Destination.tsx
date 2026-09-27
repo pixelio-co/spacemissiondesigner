@@ -3,8 +3,9 @@
 import React, { useState } from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import { DESTINATIONS, type Destination } from '@/lib/missionData';
-import { DESTINATION_FACTS, TRAVEL_TIME_REFERENCE } from '@/lib/spaceData';
-import InfoExpand from '@/components/ui/InfoExpand';
+import { getDestinationFacts, DATA_NOTE } from '@/lib/spaceData';
+import { STAGE_EDUCATION } from '@/lib/missionEducation';
+import WhyItMatters from '@/components/ui/WhyItMatters';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
@@ -92,33 +93,42 @@ export default function Stage2Destination({ store }: Props) {
                       </ul>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4 pt-2 border-t border-border flex-wrap">
-                    <div>
-                      <div className="text-xs text-muted-foreground">Signal Delay</div>
-                      <div className="text-xs font-mono font-semibold text-info">{dest.communicationDelay}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted-foreground">Typical real cruise time</div>
-                      <div className="text-xs font-mono font-semibold text-foreground">{TRAVEL_TIME_REFERENCE[key].typicalCruise}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted-foreground">Gravity</div>
-                      <div className="text-xs font-mono font-semibold text-foreground">
-                        {DESTINATION_FACTS[key].surfaceGravityMs2 != null ? `${DESTINATION_FACTS[key].surfaceGravityMs2} m/s²` : 'varies'}
+                  {(() => {
+                    const facts = getDestinationFacts(key);
+                    return (
+                      <div className="flex items-center gap-4 pt-2 border-t border-border">
+                        <div>
+                          <div className="text-xs text-muted-foreground">Signal delay (one-way light time)</div>
+                          <div className="text-xs font-mono font-semibold text-info">{dest.communicationDelay}</div>
+                        </div>
+                        {facts && (
+                          <div>
+                            <div className="text-xs text-muted-foreground">Gravity</div>
+                            <div className="text-xs font-mono font-semibold text-foreground">
+                              {facts.gravityMs2} m/s²
+                            </div>
+                          </div>
+                        )}
+                        {facts && (
+                          <div>
+                            <div className="text-xs text-muted-foreground">Real mission</div>
+                            <div className="text-xs text-foreground max-w-[220px]">{facts.realMissionContext.split(';')[0]}</div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  </div>
-                  <div className="text-[10px] text-muted-foreground leading-relaxed">
-                    <span className="text-success font-semibold">Real example:</span> {TRAVEL_TIME_REFERENCE[key].example}. {TRAVEL_TIME_REFERENCE[key].note}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground/80 italic">
-                    Data: NASA Planetary Fact Sheet snapshot · gravity/temp are representative values.
-                  </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
           );
         })}
+      </div>
+
+      <WhyItMatters education={STAGE_EDUCATION.destination} compact />
+
+      <div className="p-3 rounded-lg bg-muted/30 border border-border">
+        <p className="text-[10px] text-muted-foreground leading-relaxed italic">{DATA_NOTE}</p>
       </div>
     </div>
   );

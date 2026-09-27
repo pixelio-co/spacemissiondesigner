@@ -219,7 +219,7 @@ export default function HeroSection() {
         <div className="mt-8 flex items-center justify-center gap-8 text-sm text-muted-foreground">
           {[
             { value: '10', label: 'Destinations' },
-            { value: '10', label: 'Scenarios' },
+            { value: '17', label: 'Science Scenarios' },
             { value: '6', label: 'Spacecraft Types' },
             { value: '9', label: 'Instruments' },
           ].map((stat) => (

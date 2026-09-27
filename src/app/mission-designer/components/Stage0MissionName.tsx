@@ -17,7 +17,9 @@ export default function Stage0MissionName({ store }: Props) {
   const value = watch('missionName');
 
   React.useEffect(() => {
-    updateMissionName(value);
+    if (typeof value === 'string') {
+      updateMissionName(value);
+    }
   }, [value, updateMissionName]);
 
   const suggestions = ['Project Aurora', 'Mission Helios', 'Operation Voyager', 'Artemis Deep', 'Project Cassini II'];

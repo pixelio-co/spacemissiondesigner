@@ -1,21 +1,21 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import type { useMissionStore } from '@/lib/missionStore';
 import type { AnalysisScores } from '@/lib/missionData';
 import {
   OBJECTIVES, DESTINATIONS, SPACECRAFT_TYPES, INSTRUMENTS,
   PROPULSION_SYSTEMS, POWER_SYSTEMS, COMMUNICATION_SYSTEMS, getOverallScore
 } from '@/lib/missionData';
-import { CheckCircle, AlertTriangle, XCircle } from 'lucide-react';
-import ArchitectureDiagram from '@/components/ui/ArchitectureDiagram';
-import SolarSystemView from '@/components/ui/SolarSystemView';
-import MissionDna from '@/components/ui/MissionDna';
-import { computeMissionDna } from '@/lib/missionRules';
+import type { MissionDNA } from '@/lib/missionDNA';
+import DNABars from '@/components/ui/DNABars';
+import { getDestinationFacts } from '@/lib/spaceData';
+import { CheckCircle, AlertTriangle, XCircle, ScrollText } from 'lucide-react';
 
 interface Props {
   store: ReturnType<typeof useMissionStore>;
   scores: AnalysisScores;
+  dna: MissionDNA;
 }
 
 function ScoreIcon({ score }: { score: number }) {
@@ -24,10 +24,11 @@ function ScoreIcon({ score }: { score: number }) {
   return <XCircle size={14} className="text-danger" />;
 }
 
-export default function Stage8Review({ store, scores }: Props) {
+export default function Stage8Review({ store, scores, dna }: Props) {
   const { mission } = store;
   const overall = getOverallScore(scores);
-  const dna = computeMissionDna(mission);
+  const [showDnaExplain, setShowDnaExplain] = useState(true);
+  const facts = mission.destination ? getDestinationFacts(mission.destination) : null;
 
   const reviewItems = [
     {
@@ -122,6 +123,28 @@ export default function Stage8Review({ store, scores }: Props) {
         )}
       </div>
 
+      {/* Mission DNA summary */}
+      <div className="space-card p-4 border-primary/30">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-foreground uppercase tracking-wider">Mission DNA</h3>
+          <button
+            type="button"
+            onClick={() => setShowDnaExplain(v => !v)}
+            className="text-xs text-info hover:text-info/80 font-medium inline-flex items-center gap-1"
+          >
+            <ScrollText size={12} />
+            {showDnaExplain ? 'Hide explanations' : 'Explain values'}
+          </button>
+        </div>
+        <DNABars dna={dna} showExplanations={showDnaExplain} dense />
+        {facts && (
+          <p className="text-[10px] text-muted-foreground mt-3 leading-relaxed">
+            Destination conditions (NASA planetary data): {facts.tempRangeC ?? facts.meanTempC} ·
+            gravity {facts.gravityMs2} m/s² · one-way light time ≈ {Math.round(facts.avgOneWayDelaySeconds / 60)} min.
+          </p>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Configuration summary */}
         <div className="space-card p-4">
@@ -164,15 +187,6 @@ export default function Stage8Review({ store, scores }: Props) {
             ))}
           </div>
         </div>
-      </div>
-
-      {/* Mission architecture — the whole system at a glance */}
-      <ArchitectureDiagram mission={mission} compact />
-
-      {/* Solar system position + Mission DNA summary side by side */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-        <SolarSystemView destination={mission.destination} progress={100} phaseLabel="Planned trajectory" />
-        <MissionDna dna={dna} compact />
       </div>
 
       <div className="p-4 rounded-lg bg-accent/10 border border-accent/30">
