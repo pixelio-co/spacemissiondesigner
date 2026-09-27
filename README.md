@@ -1,9 +1,1 @@
-Space Mission Designer
-
-An interactive space mission planning and visualization platform created for the NASA Space Apps Challenge 2026.
-
-Features
-Interactive space mission planning
-Mission design and simulation
-Space exploration visualization
-Educational mission scenarios
+Space Mission Designer is an interactive educational space-mission design and simulation experience. You build a mission from the ground up: pick an objective and a destination, choose a spacecraft, select scientific instruments, and define propulsion, power, and communication systems. Every choice is explained in plain language and scored across a transparent "Mission DNA" profile of six dimensions. You then launch the mission and watch it run in a mission-control dashboard while real one-way light-time delays and configuration-driven events play out. When something goes wrong, you make real trade-off decisions — protect the spacecraft or keep doing science, spend propellant or adapt the plan. The simulation then evaluates which science was actually possible given your instruments and systems, and produces a final report. It teaches one core idea: space missions are systems of interconnected decisions, and understanding those connections is the real mission. There is no account, no leaderboard, and no persistence — the whole experience lives in a single browser session.
