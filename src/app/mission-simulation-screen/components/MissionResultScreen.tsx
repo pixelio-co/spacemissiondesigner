@@ -5,7 +5,7 @@
  *
  * Sections: MISSION OVERVIEW · MISSION CONFIGURATION · SCIENCE RETURN ·
  * MISSION PERFORMANCE · MISSION OUTCOME · FAILURE INVESTIGATOR (when the
- * mission struggled) · MISSION LESSONS · What-If/Replay/Next actions.
+ * mission struggled) · MISSION LESSONS · Replay/Learn/New Mission actions.
  */
 
 import React from 'react';
@@ -318,12 +318,9 @@ export default function MissionResultScreen({
           Understand Your Mission Deeper
         </h2>
         <p className="text-xs text-muted-foreground mb-4">
-          Compare an alternative design, replay a key decision, or review what you learned.
+          Replay a key decision, or review what you learned.
         </p>
         <div className="flex flex-col sm:flex-row items-center gap-3">
-          <Link href="/what-if-lab" className="btn-secondary w-full sm:w-auto justify-center">
-            Compare in What-If Lab
-          </Link>
           <Link href="/replay" className="btn-secondary w-full sm:w-auto justify-center">
             <RotateCcw size={14} />
             Replay Mission
