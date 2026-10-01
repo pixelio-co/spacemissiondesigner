@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useMissionStore } from '@/lib/missionStore';
@@ -24,6 +24,17 @@ export default function MissionDesignerClient() {
   const router = useRouter();
   const store = useMissionStore();
   const { mission, completeStage, goToStage, resetMission, getProgressPercent } = store;
+
+  // Scroll back to the top whenever the stage actually changes (Next, Back, or a
+  // progress-bar jump), so every stage starts at its heading. The ref guard keeps
+  // this from firing on the initial mount — only real stage changes trigger it.
+  const lastStageRef = useRef(mission.currentStage);
+
+  useEffect(() => {
+    if (lastStageRef.current === mission.currentStage) return;
+    lastStageRef.current = mission.currentStage;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [mission.currentStage]);
 
   const scores = calculateMissionScores(mission);
   const dna = computeMissionDNA(mission, scores);
